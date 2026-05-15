@@ -1,7 +1,7 @@
 {
   "id": "trivium",
   "name": "Trivium",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Multiple-choice trivia rounds played via Discord buttons, with per-server leaderboards, per-user streaks, and admin-scheduled daily trivia. Questions are sourced from Open Trivia DB with The Trivia API as fallback.",
   "author": "CubCadet",
   "tags": ["trivia", "games", "fun", "engagement", "daily"],
@@ -107,13 +107,17 @@
               "type": 3,
               "required": true,
               "choices": [
-                {"name": "show",       "value": "show"},
-                {"name": "channel",    "value": "channel"},
-                {"name": "time",       "value": "time"},
-                {"name": "difficulty", "value": "difficulty"},
-                {"name": "timer",      "value": "timer"},
-                {"name": "mode",       "value": "mode"},
-                {"name": "category",   "value": "category"}
+                {"name": "show",              "value": "show"},
+                {"name": "channel",           "value": "channel"},
+                {"name": "time",              "value": "time"},
+                {"name": "difficulty",        "value": "difficulty"},
+                {"name": "timer",             "value": "timer"},
+                {"name": "mode",              "value": "mode"},
+                {"name": "category",          "value": "category"},
+                {"name": "admin-bootstrap",   "value": "admin-bootstrap"},
+                {"name": "admin-list",        "value": "admin-list"},
+                {"name": "admin-add",         "value": "admin-add"},
+                {"name": "admin-remove",      "value": "admin-remove"}
               ]
             },
             {

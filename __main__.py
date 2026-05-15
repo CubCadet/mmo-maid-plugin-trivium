@@ -57,7 +57,7 @@ from mmo_maid_sdk import (
 # Module-level version constant. Kept in sync with manifest.json by a regression
 # test in tests/test_meta.py. Used in the on_ready log because ctx.version is
 # empty under v0.5.2 pool-mode workers.
-__version__ = "1.0.3"
+__version__ = "1.0.4"
 
 plugin = Plugin()
 
@@ -181,6 +181,11 @@ DEFAULT_CONFIG = {
     "timer_seconds": DEFAULT_TIMER_SECONDS,
     "mode": "single",                  # "single" | "open"
     "daily_category": "General Knowledge",
+    "admin_user_ids": [],              # 1.0.4: explicit allowlist — primary
+                                       # admin gate, since the Discord-based
+                                       # check turned out unusable in v0.5.2
+                                       # (get_guild 404s, list_roles returns
+                                       # permissions=0).
     "version": 1,                      # config schema version
 }
 
@@ -244,6 +249,9 @@ def make_request_id() -> str:
 KV_CONFIG = "cfg:server"
 KV_OTDB_TOKEN = "otdb:session_token"
 KV_ADMIN_CACHE = "cache:admin"          # {owner_id, roles_by_id, fetched_at}
+KV_SCORE_INDEX = "scoreindex:users"     # list[user_id] — manual index because
+                                        # v0.5.2 pool-mode kv.list returns
+                                        # empty for our prefixes
 
 # Admin gate cache lifetime. Short enough that newly-granted MANAGE_GUILD
 # propagates within ~10 min; long enough to absorb burst use without hitting
@@ -322,6 +330,41 @@ def get_score(ctx: Context, user_id: str) -> dict:
     return rec
 
 
+def get_score_index(ctx: Context) -> list:
+    """Read the manual score-user index. Returns [] on miss or malformed."""
+    raw = ctx.kv.get(KV_SCORE_INDEX)
+    if isinstance(raw, list):
+        return [u for u in raw if isinstance(u, str)]
+    return []
+
+
+def add_to_score_index(ctx: Context, user_id: str) -> None:
+    """Append user_id to the score index if not present.
+
+    1.0.4 workaround: v0.5.2 pool-mode kv.list returns empty for our
+    "score:" prefix even when keys exist (confirmed in production logs).
+    We maintain a manual index so cmd_leaderboard can enumerate without
+    relying on kv.list.
+    """
+    if not user_id:
+        return
+    idx = get_score_index(ctx)
+    if user_id in idx:
+        return
+    idx.append(user_id)
+    try:
+        ctx.kv.set(KV_SCORE_INDEX, idx)
+    except KvQuotaError:
+        pass
+
+
+def _write_score(ctx: Context, user_id: str, rec: dict) -> None:
+    """Save a score record and keep the score index in sync. Use this
+    instead of ctx.kv.set directly anywhere a score record gets written."""
+    ctx.kv.set(kv_score(user_id), rec)
+    add_to_score_index(ctx, user_id)
+
+
 def award_points(ctx: Context, user_id: str, difficulty: str, *, is_daily: bool = False) -> int:
     base = POINT_VALUES.get(difficulty, 10)
     pts = base + (DAILY_BONUS if is_daily else 0)
@@ -333,7 +376,7 @@ def award_points(ctx: Context, user_id: str, difficulty: str, *, is_daily: bool 
     rec["streak_current"] = streak
     rec["streak_best"] = max(int(rec.get("streak_best") or 0), streak)
     rec["last_played_ts"] = int(time.time())
-    ctx.kv.set(kv_score(user_id), rec)
+    _write_score(ctx, user_id, rec)
     return pts
 
 
@@ -343,7 +386,7 @@ def break_streak(ctx: Context, user_id: str) -> None:
     rec["total"] = int(rec.get("total") or 0) + 1
     rec["streak_current"] = 0
     rec["last_played_ts"] = int(time.time())
-    ctx.kv.set(kv_score(user_id), rec)
+    _write_score(ctx, user_id, rec)
 
 
 # ── Seen ring (per-category, capped at 200)
@@ -961,6 +1004,20 @@ def _refresh_admin_cache(ctx: Context, *, request_id: str = "") -> dict | None:
                 level="warning", tags=["trivium", "admin"],
                 request_id=request_id, exc_type=type(exc).__name__)
         return None
+    # Diagnostic — in v0.5.2 production we saw list_roles return 3 roles
+    # all with permissions=0, which doesn't match Discord reality. Log the
+    # first role's raw permissions value so future debugging has a record
+    # of whether the field is missing, stringified, or stripped by the
+    # runtime. Cheap (~1 log per ADMIN_CACHE_TTL).
+    if isinstance(roles, list) and roles and isinstance(roles[0], dict):
+        first = roles[0]
+        ctx.log("list_roles diagnostic", level="info",
+                tags=["trivium", "admin", "diagnostic"],
+                request_id=request_id,
+                role_count=str(len(roles)),
+                first_role_keys=",".join(sorted(first.keys())),
+                first_role_perms_type=type(first.get("permissions")).__name__,
+                first_role_perms_repr=repr(first.get("permissions"))[:80])
     roles_by_id: dict[str, int] = {}
     if isinstance(roles, list):
         for r in roles:
@@ -993,28 +1050,41 @@ def _refresh_admin_cache(ctx: Context, *, request_id: str = "") -> dict | None:
 
 
 def has_manage_guild(ctx: Context, event: dict) -> tuple[bool, str]:
-    """Return (allowed, source) for /trivia config. Three layers, fail-closed.
+    """Return (allowed, source) for /trivia config. Four layers, fail-closed.
+
+    Layer 0 (1.0.4: the primary path):
+        Check the cfg:server.admin_user_ids allowlist. Populated by the
+        /trivia config action:admin-bootstrap one-shot command and
+        managed thereafter by existing admins via action:admin-add/remove.
+        No Discord API call, no race condition once seeded.
 
     Layer A (no API call):
         If event["member"]["permissions"] is present, decide from that.
-        v0.5.2 doesn't actually expose this field on interaction_create —
-        this branch is forward-compat. Kept first so tests that supply
-        member.permissions don't pay for Discord calls they don't need.
+        v0.5.2 doesn't expose this field on interaction_create — branch
+        is forward-compat in case a future SDK populates it.
 
     Layer B (cached):
         Read KV_ADMIN_CACHE. If user is the guild owner → allow. Otherwise
         fetch member roles via ctx.discord.get_member, union their
-        permissions from the cached roles_by_id map, check the bit.
+        permissions from the cached roles_by_id map, check the bit. In
+        v0.5.2 this is effectively dead weight (list_roles returns
+        permissions=0 for all roles), but kept as a safety net for future
+        runtimes.
 
     Layer C (cold):
         If the cache is missing or stale, call ctx.discord.get_guild() +
-        list_roles() once each, populate, then fall through to Layer B
-        logic.
+        list_roles() once each, populate, then fall through to Layer B.
 
     Fail-closed: any unhandled SDK error → (False, "denied_error_<type>").
     """
     request_id = make_request_id()
     user_id = str(event.get("user_id") or "")
+
+    # Layer 0 — explicit KV allowlist (primary path in 1.0.4)
+    cfg = get_config(ctx)
+    admin_uids = cfg.get("admin_user_ids") or []
+    if isinstance(admin_uids, list) and user_id and user_id in admin_uids:
+        return True, "admin_allowlist"
 
     # Layer A — free, no Discord call
     member = event.get("member")
@@ -1404,24 +1474,18 @@ def trivia_root(ctx: Context, event: dict) -> None:
 # ──────────────────────────────────────────────────────────────────────────
 
 def cmd_leaderboard(ctx: Context, event: dict) -> None:
-    # 1.0.3: switched from ctx.kv.list_values to ctx.kv.list + ctx.kv.get_many.
-    # In v1.0.2 production list_values consistently returned empty for the
-    # "score:" prefix even when the keys clearly existed. list + get_many is
-    # more primitive and well-exercised by other plugins. get_many takes up
-    # to 50 keys per call so we batch.
-    try:
-        keys = ctx.kv.list(prefix="score:", limit=1000) or []
-    except Exception as exc:
-        ctx.log(f"leaderboard: kv.list failed: {exc}",
-                level="warning", tags=["trivium", "leaderboard"],
-                exc_type=type(exc).__name__)
-        keys = []
+    # 1.0.4: switched from kv.list to the manual scoreindex:users index.
+    # v0.5.2 production logs confirmed kv.list returns empty for our "score:"
+    # prefix even when score:<uid> keys clearly exist. The index is
+    # maintained by award_points and break_streak via add_to_score_index;
+    # the leaderboard reads it and fetches per-user records with get_many.
+    idx = get_score_index(ctx)
+    score_keys = [kv_score(uid) for uid in idx]
 
     all_scores: dict = {}
-    if keys:
-        # get_many caps at 50 — batch through the key list
-        for i in range(0, len(keys), 50):
-            chunk = keys[i:i + 50]
+    if score_keys:
+        for i in range(0, len(score_keys), 50):
+            chunk = score_keys[i:i + 50]
             try:
                 got = ctx.kv.get_many(chunk) or {}
             except Exception as exc:
@@ -1434,14 +1498,13 @@ def cmd_leaderboard(ctx: Context, event: dict) -> None:
 
     ctx.log("leaderboard fetched",
             level="info", tags=["trivium", "leaderboard"],
-            key_count=len(keys), value_count=len(all_scores))
+            index_size=str(len(idx)), value_count=str(len(all_scores)))
 
     rows: list[tuple[str, int, dict]] = []
-    for key, val in all_scores.items():
-        if not isinstance(key, str):
-            continue
-        # In case the runtime returns JSON-encoded values rather than dicts,
-        # try to parse them. Belt-and-suspenders.
+    for user_id in idx:
+        key = kv_score(user_id)
+        val = all_scores.get(key)
+        # Defensive: runtime might return JSON-encoded values rather than dicts.
         if isinstance(val, str):
             try:
                 val = json.loads(val)
@@ -1449,9 +1512,6 @@ def cmd_leaderboard(ctx: Context, event: dict) -> None:
                 continue
         if not isinstance(val, dict):
             continue
-        if ":" not in key:
-            continue
-        user_id = key.split(":", 1)[1]
         rows.append((user_id, int(val.get("score") or 0), val))
     rows.sort(key=lambda r: r[1], reverse=True)
 
@@ -1558,7 +1618,7 @@ def cmd_daily(ctx: Context, event: dict) -> None:
 # ──────────────────────────────────────────────────────────────────────────
 
 CONFIG_HELP = (
-    "**Config actions** (admin only):\n"
+    "**Config actions** (admin only, except admin-bootstrap):\n"
     "• `action:show` — display current config\n"
     "• `action:channel value:#channel` — set daily channel (omit value to use current channel)\n"
     "• `action:time value:HH:MM` — set daily UTC time (e.g. `09:00`)\n"
@@ -1566,6 +1626,10 @@ CONFIG_HELP = (
     "• `action:timer value:10..60` — answer timer in seconds\n"
     "• `action:mode value:single|open` — game mode\n"
     "• `action:category value:<one of the 24 categories>` — daily question category\n"
+    "• `action:admin-bootstrap` — claim admin (only works if no admins are set yet)\n"
+    "• `action:admin-list` — show current admins\n"
+    "• `action:admin-add value:@user` — add a Trivium admin\n"
+    "• `action:admin-remove value:@user` — remove a Trivium admin\n"
 )
 
 CHANNEL_MENTION_RE = re.compile(r"<#(\d+)>")
@@ -1574,6 +1638,20 @@ HHMM_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 
 def cmd_config(ctx: Context, event: dict, opts: dict) -> None:
+    action_raw = opts.get("action") or "show"
+    action = action_raw.lower().strip() if isinstance(action_raw, str) else "show"
+    raw_value = opts.get("value")
+    cfg = get_config(ctx)
+
+    # 1.0.4: admin-bootstrap is the only action that DOESN'T require the
+    # gate. It's a one-shot "claim admin while nobody is admin yet"
+    # command. Race-prone in theory (any user could claim first); in
+    # practice the server installer runs it immediately after install and
+    # wins. Logged at info-level for auditability.
+    if action == "admin-bootstrap":
+        _config_admin_bootstrap(ctx, event, cfg)
+        return
+
     allowed, src = has_manage_guild(ctx, event)
     if not allowed:
         # Log the denial source so ops can see why a "legitimate" admin
@@ -1582,15 +1660,14 @@ def cmd_config(ctx: Context, event: dict, opts: dict) -> None:
                 level="info", tags=["trivium", "admin"],
                 user_id=str(event.get("user_id") or ""), source=src)
         ctx.interaction.respond(
-            content="You need the **Manage Server** permission to run this.",
+            content=(
+                "You need to be a Trivium admin to run this. "
+                "First-time setup: have the server admin run "
+                "`/trivia config action:admin-bootstrap` to claim admin."
+            ),
             ephemeral=True,
         )
         return
-
-    action_raw = opts.get("action") or "show"
-    action = action_raw.lower().strip() if isinstance(action_raw, str) else "show"
-    raw_value = opts.get("value")
-    cfg = get_config(ctx)
 
     if action == "show":
         _config_show(ctx, cfg)
@@ -1606,13 +1683,159 @@ def cmd_config(ctx: Context, event: dict, opts: dict) -> None:
         _config_set_mode(ctx, cfg, raw_value)
     elif action == "category":
         _config_set_category(ctx, cfg, raw_value)
+    elif action == "admin-list":
+        _config_admin_list(ctx, cfg)
+    elif action == "admin-add":
+        _config_admin_add(ctx, cfg, raw_value)
+    elif action == "admin-remove":
+        _config_admin_remove(ctx, event, cfg, raw_value)
     else:
         ctx.interaction.respond(content=CONFIG_HELP, ephemeral=True)
+
+
+# ── Admin allowlist sub-commands ───────────────────────────────────────────
+
+USER_MENTION_RE = re.compile(r"<@!?(\d+)>")
+
+
+def _resolve_user_id(value) -> str:
+    """Extract a user_id from a mention <@123>, <@!123>, or a raw 17-21 digit id."""
+    if not isinstance(value, str):
+        return ""
+    s = value.strip()
+    m = USER_MENTION_RE.search(s)
+    if m:
+        return m.group(1)
+    m2 = re.match(r"^(\d{15,21})$", s)
+    if m2:
+        return m2.group(1)
+    return ""
+
+
+def _config_admin_bootstrap(ctx: Context, event: dict, cfg: dict) -> None:
+    """One-shot: claim admin if no admins are configured yet."""
+    existing = cfg.get("admin_user_ids") or []
+    if not isinstance(existing, list):
+        existing = []
+    user_id = str(event.get("user_id") or "")
+    if existing:
+        ctx.interaction.respond(
+            content=(
+                f"Admins are already configured ({len(existing)} user(s)). "
+                "An existing admin can add you with "
+                "`/trivia config action:admin-add value:@you`."
+            ),
+            ephemeral=True,
+        )
+        return
+    if not user_id:
+        ctx.interaction.respond(
+            content="Couldn't determine your user ID.",
+            ephemeral=True,
+        )
+        return
+    cfg["admin_user_ids"] = [user_id]
+    save_config(ctx, cfg)
+    ctx.log("trivia admin-bootstrap claimed",
+            level="info", tags=["trivium", "admin", "bootstrap"],
+            user_id=user_id)
+    ctx.interaction.respond(
+        content=(
+            f"<@{user_id}> is now the first Trivium admin for this server. "
+            "Add more with `/trivia config action:admin-add value:@user`."
+        ),
+        ephemeral=True, allowed_mentions={"parse": []},
+    )
+
+
+def _config_admin_list(ctx: Context, cfg: dict) -> None:
+    admins = cfg.get("admin_user_ids") or []
+    if not isinstance(admins, list) or not admins:
+        ctx.interaction.respond(
+            content="No Trivium admins configured. Run `/trivia config action:admin-bootstrap` first.",
+            ephemeral=True,
+        )
+        return
+    lines = [f"• <@{uid}>" for uid in admins if isinstance(uid, str)]
+    ctx.interaction.respond(
+        content="**Trivium admins:**\n" + "\n".join(lines),
+        ephemeral=True, allowed_mentions={"parse": []},
+    )
+
+
+def _config_admin_add(ctx: Context, cfg: dict, value) -> None:
+    new_id = _resolve_user_id(value)
+    if not new_id:
+        ctx.interaction.respond(
+            content="Couldn't parse the user. Pass `value:@user` or a raw user ID.",
+            ephemeral=True,
+        )
+        return
+    admins = cfg.get("admin_user_ids") or []
+    if not isinstance(admins, list):
+        admins = []
+    if new_id in admins:
+        ctx.interaction.respond(
+            content=f"<@{new_id}> is already a Trivium admin.",
+            ephemeral=True, allowed_mentions={"parse": []},
+        )
+        return
+    admins.append(new_id)
+    cfg["admin_user_ids"] = admins
+    save_config(ctx, cfg)
+    ctx.log("trivia admin added", level="info", tags=["trivium", "admin"],
+            user_id=new_id)
+    ctx.interaction.respond(
+        content=f"Added <@{new_id}> as a Trivium admin.",
+        ephemeral=True, allowed_mentions={"parse": []},
+    )
+
+
+def _config_admin_remove(ctx: Context, event: dict, cfg: dict, value) -> None:
+    target = _resolve_user_id(value)
+    if not target:
+        ctx.interaction.respond(
+            content="Couldn't parse the user. Pass `value:@user` or a raw user ID.",
+            ephemeral=True,
+        )
+        return
+    admins = cfg.get("admin_user_ids") or []
+    if not isinstance(admins, list) or target not in admins:
+        ctx.interaction.respond(
+            content=f"<@{target}> isn't currently a Trivium admin.",
+            ephemeral=True, allowed_mentions={"parse": []},
+        )
+        return
+    # Guard against locking everyone out: refuse to remove the last admin.
+    if len(admins) == 1:
+        ctx.interaction.respond(
+            content=(
+                "Can't remove the last admin — that would lock everyone out. "
+                "Add another admin first with `/trivia config action:admin-add value:@user`."
+            ),
+            ephemeral=True,
+        )
+        return
+    admins = [u for u in admins if u != target]
+    cfg["admin_user_ids"] = admins
+    save_config(ctx, cfg)
+    ctx.log("trivia admin removed", level="info", tags=["trivium", "admin"],
+            user_id=target,
+            actor=str(event.get("user_id") or ""))
+    ctx.interaction.respond(
+        content=f"Removed <@{target}> from Trivium admins.",
+        ephemeral=True, allowed_mentions={"parse": []},
+    )
 
 
 def _config_show(ctx: Context, cfg: dict) -> None:
     chan = cfg.get("daily_channel_id")
     chan_line = f"<#{chan}>" if chan else "(unset)"
+    admins = cfg.get("admin_user_ids") or []
+    if isinstance(admins, list) and admins:
+        admin_line = ", ".join(f"<@{u}>" for u in admins if isinstance(u, str))
+    else:
+        admin_line = "(none — run `action:admin-bootstrap`)"
     fields = [
         {"name": "Daily channel",      "value": chan_line, "inline": True},
         {"name": "Daily time (UTC)",   "value": cfg.get("daily_time_utc") or "(unset)", "inline": True},
@@ -1620,6 +1843,7 @@ def _config_show(ctx: Context, cfg: dict) -> None:
         {"name": "Default difficulty", "value": str(cfg.get("default_difficulty") or "any"), "inline": True},
         {"name": "Answer timer (s)",   "value": str(int(cfg.get("timer_seconds") or DEFAULT_TIMER_SECONDS)), "inline": True},
         {"name": "Mode",               "value": str(cfg.get("mode") or "single"), "inline": True},
+        {"name": "Admins",             "value": admin_line, "inline": False},
     ]
     ctx.interaction.respond(
         embeds=[{

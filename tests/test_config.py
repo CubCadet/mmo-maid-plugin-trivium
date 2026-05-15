@@ -229,7 +229,8 @@ def test_set_category_invalid_rejected():
 
 def test_non_admin_with_explicit_perms_denied():
     """A user whose perms are explicitly present but lack MANAGE_GUILD must
-    be rejected even if the manifest default somehow let them through."""
+    be rejected. 1.0.4: denial message mentions admin-bootstrap as the
+    recovery path."""
     ctx = MockContext()
     event = make_event("interaction_create", interaction_type=2,
                        user_id="rando",
@@ -238,7 +239,8 @@ def test_non_admin_with_explicit_perms_denied():
     # Channel must NOT have been updated
     cfg = get_config(ctx)
     assert cfg["daily_channel_id"] is None
-    # And the response should be the denial
+    # And the response should be the denial — must mention admin-bootstrap
+    # so users know how to recover.
     last = ctx.interaction.responses[-1]
     assert last["ephemeral"] is True
-    assert "Manage Server" in last["content"]
+    assert "admin-bootstrap" in last["content"]

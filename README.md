@@ -35,7 +35,9 @@ This plugin lands in the **Safe** tier. Each capability is requested for a speci
 | `/trivia daily` | Show today's daily trivia status (or how to configure if it isn't set). | Anyone |
 | `/trivia config <action> [value]` | Configure daily channel, time, default difficulty, timer (10–60s), mode (single/open), daily category. | Admin (Manage Server) |
 
-`/trivia config` is gated in-handler by `has_manage_guild`, which (a) trusts `event["member"]["permissions"]` when the runtime exposes it, (b) falls back to looking up the guild owner ID + the requesting member's role permissions via `discord:read` (cached in KV for 10 minutes), and (c) fails closed if every check is inconclusive. The cache invalidates naturally on TTL expiry, so newly-granted MANAGE_GUILD propagates within ~10 minutes.
+`/trivia config` uses a **KV-based admin allowlist** (`cfg:server.admin_user_ids`). The Discord-based role check turned out unusable in v0.5.2 (the runtime's `get_guild` returns 404 and `list_roles` returns `permissions=0` for every role), so the allowlist is the primary gate.
+
+**First-time setup:** the server admin runs `/trivia config action:admin-bootstrap` immediately after install. While the allowlist is empty, the first user to run that command claims admin. Subsequent additions use `/trivia config action:admin-add value:@user` (admin-only). `action:admin-remove` and `action:admin-list` are also available; you can't remove the last admin.
 
 ## Known limitations (v1)
 

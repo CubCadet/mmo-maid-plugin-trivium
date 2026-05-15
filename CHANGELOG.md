@@ -20,6 +20,48 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-05-15
+
+### Changed
+- **`/trivia config` admin gate is now KV-allowlist-based.** v1.0.3
+  production confirmed that the v0.5.2 runtime's `ctx.discord.get_guild`
+  returns HTTP 404 and `ctx.discord.list_roles` returns all roles with
+  `permissions=0` — so neither the owner-shortcut nor the role-bit-union
+  path could detect a legitimate admin. 1.0.4 adds a primary
+  `cfg:server.admin_user_ids` allowlist (Layer 0) that decides without
+  any Discord API call. The Discord-based check is retained as a safety
+  net for future runtimes.
+- New first-time setup: run `/trivia config action:admin-bootstrap`
+  immediately after install. The user who runs it claims admin while
+  the allowlist is empty. Subsequent additions use `action:admin-add
+  value:@user` (admin-only).
+- New admin sub-commands: `admin-bootstrap`, `admin-list`, `admin-add`,
+  `admin-remove`. `admin-remove` refuses to remove the last admin to
+  prevent lockout.
+- `/trivia config action:show` now displays the admins list.
+
+### Fixed
+- **`/trivia leaderboard` works again.** v1.0.3 used `ctx.kv.list` after
+  v1.0.2's `ctx.kv.list_values` failed; production confirmed both come
+  back empty in pool mode (`key_count=0` even with valid score keys
+  present). 1.0.4 maintains a manual `scoreindex:users` KV value (list
+  of user_ids) that `award_points` and `break_streak` keep updated.
+  `cmd_leaderboard` reads this index and uses `kv.get_many` to fetch the
+  score records — no `kv.list*` calls anywhere.
+
+### Added
+- Diagnostic log `list_roles diagnostic` on cache refresh with the first
+  role's keys, the `permissions` field type, and a short repr. If a
+  future runtime starts returning real permissions data, the log will
+  show it.
+
+### Migration note
+- Existing v1.0.3 users who already have score records won't appear on
+  the leaderboard until they play once more (their next `award_points`
+  or `break_streak` call adds them to the manual index). Since
+  `kv.list*` is broken, there's no way to rebuild the index from
+  existing keys at install time — lazy rebuild is the only option.
+
 ## [1.0.3] - 2026-05-15
 
 ### Fixed

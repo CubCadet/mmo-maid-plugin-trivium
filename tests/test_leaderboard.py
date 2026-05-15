@@ -3,16 +3,28 @@ from __future__ import annotations
 
 from mmo_maid_sdk.testing import MockContext, make_event
 
-from plugin_main import cmd_leaderboard, cmd_stats, kv_score
+from plugin_main import (
+    KV_SCORE_INDEX,
+    add_to_score_index,
+    cmd_leaderboard,
+    cmd_stats,
+    kv_score,
+)
 
 
 def _seed_score(ctx, user_id, *, score=0, correct=0, total=0,
                 streak_current=0, streak_best=0):
+    """Write a score record AND update the score index.
+
+    1.0.4: cmd_leaderboard reads from KV_SCORE_INDEX (a manually maintained
+    list of user_ids), not via kv.list. Tests must keep both in sync.
+    """
     ctx.kv.set(kv_score(user_id), {
         "score": score, "correct": correct, "total": total,
         "streak_current": streak_current, "streak_best": streak_best,
         "last_played_ts": 0,
     })
+    add_to_score_index(ctx, user_id)
 
 
 # ── /trivia leaderboard ────────────────────────────────────────────────────
@@ -86,13 +98,13 @@ def test_leaderboard_shows_accuracy_percentage():
     assert "50%" in desc
 
 
-# ── v1.0.3 regression: list + get_many path ────────────────────────────────
+# ── v1.0.4 regression: score-index path ────────────────────────────────────
 
-def test_leaderboard_uses_list_plus_get_many_not_list_values():
-    """v1.0.2 production: ctx.kv.list_values returned empty for the score:
-    prefix even when keys existed. v1.0.3 switches to ctx.kv.list +
-    ctx.kv.get_many. This test pins the new implementation choice in place
-    by verifying the leaderboard works with seeded scores."""
+def test_leaderboard_reads_from_score_index_not_kv_list():
+    """v1.0.4: cmd_leaderboard reads from the manual scoreindex:users
+    KV value (a list of user_ids) and fetches per-user records via
+    kv.get_many. v1.0.2 and v1.0.3 both used kv.list*/kv.list_values
+    primitives that came back empty in production."""
     ctx = MockContext()
     _seed_score(ctx, "alice", score=100, correct=5, total=5)
     _seed_score(ctx, "bob", score=80, correct=4, total=5)
@@ -101,6 +113,34 @@ def test_leaderboard_uses_list_plus_get_many_not_list_values():
     desc = ctx.interaction.responses[-1]["embeds"][0]["description"]
     assert "<@alice>" in desc
     assert "<@bob>" in desc
+
+
+def test_leaderboard_ignores_users_not_in_index_even_if_score_key_exists():
+    """If a score:<uid> KV key exists but the user_id isn't in the index,
+    they don't appear on the leaderboard. This is by design — the index is
+    the source of truth in 1.0.4 (since kv.list is unreliable)."""
+    ctx = MockContext()
+    # Write a score record directly, bypassing add_to_score_index
+    ctx.kv.set(kv_score("orphan"), {
+        "score": 999, "correct": 99, "total": 99,
+        "streak_current": 0, "streak_best": 0, "last_played_ts": 0,
+    })
+    # Index doesn't include "orphan"
+    _seed_score(ctx, "alice", score=10, correct=1, total=1)
+    event = make_event("interaction_create", interaction_type=2, user_id="someone")
+    cmd_leaderboard(ctx, event)
+    desc = ctx.interaction.responses[-1]["embeds"][0]["description"]
+    assert "<@orphan>" not in desc
+    assert "<@alice>" in desc
+
+
+def test_leaderboard_index_dedupes_repeat_additions():
+    """add_to_score_index should be idempotent on repeat user_ids."""
+    ctx = MockContext()
+    _seed_score(ctx, "u1", score=10, correct=1, total=1)
+    _seed_score(ctx, "u1", score=20, correct=2, total=2)        # re-seed
+    idx = ctx.kv.get(KV_SCORE_INDEX) or []
+    assert idx == ["u1"]
 
 
 def test_leaderboard_parses_json_string_values_defensively():
@@ -113,6 +153,8 @@ def test_leaderboard_parses_json_string_values_defensively():
         "score": 42, "correct": 3, "total": 5,
         "streak_current": 1, "streak_best": 2, "last_played_ts": 0,
     }))
+    # Add to the index manually (since we bypassed _seed_score's index update)
+    add_to_score_index(ctx, "u1")
     event = make_event("interaction_create", interaction_type=2, user_id="someone")
     cmd_leaderboard(ctx, event)
     desc = ctx.interaction.responses[-1]["embeds"][0]["description"]
@@ -135,8 +177,9 @@ def test_leaderboard_batches_get_many_over_50_key_chunks():
 
 
 def test_leaderboard_emits_diagnostic_log_with_counts():
-    """v1.0.3 adds a "leaderboard fetched" info log so ops can see what
-    list and get_many actually returned. Don't accidentally remove it."""
+    """The "leaderboard fetched" info log captures index_size and
+    value_count so ops can see what the index + get_many returned. Don't
+    accidentally remove it."""
     ctx = MockContext()
     _seed_score(ctx, "u1", score=50, correct=1, total=1)
     event = make_event("interaction_create", interaction_type=2, user_id="someone")
