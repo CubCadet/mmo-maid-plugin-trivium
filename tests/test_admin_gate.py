@@ -242,18 +242,72 @@ def test_layer_c_stale_cache_triggers_refetch():
 
 # ── Fail-closed paths ──────────────────────────────────────────────────────
 
-def test_sdk_error_on_get_guild_denies_closed():
+def test_get_guild_failure_is_non_fatal_role_check_still_works():
+    """v1.0.3: get_guild failure no longer denies outright. The role-permissions
+    union from list_roles + get_member is the load-bearing check. As long as
+    list_roles works and the user has a qualifying role, they're allowed."""
     from mmo_maid_sdk import SdkError
-    scripted = _ScriptedDiscord(guild_error=SdkError("upstream down"))
+    scripted = _ScriptedDiscord(
+        guild_error=SdkError("get_guild 404 from runner"),
+        roles=[{"id": "role_admin", "permissions": str(PERM_MANAGE_GUILD)}],
+        members={"u1": {"user_id": "u1", "roles": ["role_admin"]}},
+    )
     ctx = _ctx_with_discord(scripted)
     allowed, src = has_manage_guild(ctx, _event(user_id="u1"))
-    assert allowed is False
-    assert src == "denied_error_no_cache"
-    # The warning log is recorded
+    assert allowed is True
+    assert src == "role_perms"
+    # The warning log is still recorded — ops should see the get_guild error
     assert any("get_guild failed" in e.get("message", "") for e in ctx.log_entries)
 
 
-def test_sdk_error_on_list_roles_denies_closed():
+def test_get_guild_failure_with_no_qualifying_role_denies_not_crashes():
+    """Belt-and-suspenders: get_guild fails, user has no qualifying role,
+    we deny politely with "no_perms_roles" — NOT crash."""
+    from mmo_maid_sdk import SdkError
+    scripted = _ScriptedDiscord(
+        guild_error=SdkError("upstream down"),
+        roles=[],
+        members={"u1": {"user_id": "u1", "roles": []}},
+    )
+    ctx = _ctx_with_discord(scripted)
+    allowed, src = has_manage_guild(ctx, _event(user_id="u1"))
+    assert allowed is False
+    # User has roles=[] (an empty list) → union_perms=0 → "no_perms_roles".
+    # If roles were missing entirely we'd get "no_perms_no_roles" instead.
+    assert src == "no_perms_roles"
+
+
+def test_runtime_error_from_get_guild_does_not_crash():
+    """v1.0.3 critical fix: the runner wraps some Discord errors as
+    RuntimeError, not the typed SdkError. v1.0.2 crashed on these because
+    the except clause was too narrow. v1.0.3 catches Exception broadly."""
+    scripted = _ScriptedDiscord(
+        guild_error=RuntimeError("RPC error (discord.get_guild): HTTP Error 404"),
+        roles=[{"id": "role_admin", "permissions": str(PERM_MANAGE_GUILD)}],
+        members={"u1": {"user_id": "u1", "roles": ["role_admin"]}},
+    )
+    ctx = _ctx_with_discord(scripted)
+    # If the broader catch isn't in place, this raises and the test fails.
+    allowed, src = has_manage_guild(ctx, _event(user_id="u1"))
+    assert allowed is True
+    assert src == "role_perms"
+
+
+def test_runtime_error_from_get_member_does_not_crash():
+    scripted = _ScriptedDiscord(
+        guild={"owner_id": "owner"},
+        roles=[{"id": "role_admin", "permissions": str(PERM_MANAGE_GUILD)}],
+        member_error=RuntimeError("RPC error (discord.get_member): timeout"),
+    )
+    ctx = _ctx_with_discord(scripted)
+    allowed, src = has_manage_guild(ctx, _event(user_id="u1"))
+    assert allowed is False
+    assert src.startswith("denied_error_")
+
+
+def test_list_roles_failure_denies_closed():
+    """list_roles is the load-bearing call — without it we have nothing to
+    union, so the cache refresh returns None and we deny."""
     from mmo_maid_sdk import SdkError
     scripted = _ScriptedDiscord(
         guild={"owner_id": "owner"},

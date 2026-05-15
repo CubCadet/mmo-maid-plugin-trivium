@@ -20,6 +20,43 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-05-15
+
+### Fixed
+- **`/trivia config` crashed on every invocation in v1.0.2 production.** Logs
+  showed `RuntimeError: RPC error (discord.get_guild): HTTP Error 404: Not
+  Found`. Two compounding causes:
+  1. The runner wraps Discord REST errors as `RuntimeError`, not the typed
+     `SdkError` / `DiscordApiError` we expected. Our `except (SdkError,
+     RpcTimeoutError)` clauses missed it, and the exception escaped to the
+     outer "Something went wrong" safety net. Now we catch `Exception` in
+     the admin-cache refresh helper and the `get_member` block. The gate
+     fails closed gracefully; ops can read `exc_type` in the log.
+  2. `get_guild` itself returning 404 is mysterious — the bot is plainly in
+     the guild (events are delivered). Until we understand why, we make
+     get_guild's failure **non-fatal** in the admin gate. The guild-owner
+     shortcut is nice-to-have; the load-bearing check is the role-permissions
+     union via `list_roles` + `get_member`. If `get_guild` 404s, we lose
+     the owner shortcut but the gate still works for any user with a role
+     that has MANAGE_GUILD or ADMINISTRATOR.
+- **`/trivia leaderboard` returned "No trivia scores yet" even with valid
+  KV state.** v1.0.2 production logs showed `score:<uid>` keys existed
+  with score=30 etc., but `ctx.kv.list_values(prefix="score:")` consistently
+  came back empty. Replaced with `ctx.kv.list(prefix="score:")` followed by
+  batched `ctx.kv.get_many(...)` calls (50-key chunks). list_values may be
+  broken or unimplemented in v0.5.2 pool-mode workers; this is the safer
+  primitive. Also added defensive JSON-string parsing in case values come
+  back stringified, and a diagnostic log line (`leaderboard fetched
+  key_count=N value_count=M`) so we can see in one place whether the
+  fix landed.
+
+### Changed
+- README "Known limitations" — corrected the claim that "the embed doesn't
+  auto-reveal the answer." It *does* reveal on click; v1.0.2 production
+  confirmed `discord.edit_message` updates the embed correctly even without
+  the `components` arg. The remaining limitation is timeout (the silent-
+  expiry case when no one clicks at all).
+
 ## [1.0.2] - 2026-05-15
 
 ### Security

@@ -57,7 +57,7 @@ from mmo_maid_sdk import (
 # Module-level version constant. Kept in sync with manifest.json by a regression
 # test in tests/test_meta.py. Used in the on_ready log because ctx.version is
 # empty under v0.5.2 pool-mode workers.
-__version__ = "1.0.2"
+__version__ = "1.0.3"
 
 plugin = Plugin()
 
@@ -930,22 +930,37 @@ def _load_admin_cache(ctx: Context) -> dict | None:
 
 def _refresh_admin_cache(ctx: Context, *, request_id: str = "") -> dict | None:
     """Call ctx.discord.get_guild() + list_roles() and write the cache.
-    Returns the freshly-built cache dict, or None on Discord failure."""
+
+    Returns the freshly-built cache dict, or None if list_roles fails (the
+    role-permissions union is load-bearing; without it we have nothing
+    to check against).
+
+    get_guild failure is non-fatal — we lose the guild-owner shortcut but
+    still gate on role permissions. A 1.0.2 production install hit a 404 on
+    get_guild that crashed the handler; making it optional fixes that.
+
+    The exception classes the runner raises aren't always typed SdkError —
+    in 1.0.2 production logs we saw a plain RuntimeError wrapping the 404.
+    Catch broadly here so the gate fails closed gracefully rather than
+    crashing.
+    """
+    owner_id = ""
     try:
         guild = ctx.discord.get_guild()
-    except (SdkError, RpcTimeoutError) as exc:
+        if isinstance(guild, dict):
+            owner_id = str(guild.get("owner_id") or "")
+    except Exception as exc:
         ctx.log(f"admin cache refresh: get_guild failed: {exc}",
                 level="warning", tags=["trivium", "admin"],
                 request_id=request_id, exc_type=type(exc).__name__)
-        return None
+        # Continue without owner_id — role lookup is the load-bearing check.
     try:
         roles = ctx.discord.list_roles()
-    except (SdkError, RpcTimeoutError) as exc:
+    except Exception as exc:
         ctx.log(f"admin cache refresh: list_roles failed: {exc}",
                 level="warning", tags=["trivium", "admin"],
                 request_id=request_id, exc_type=type(exc).__name__)
         return None
-    owner_id = str(guild.get("owner_id") or "") if isinstance(guild, dict) else ""
     roles_by_id: dict[str, int] = {}
     if isinstance(roles, list):
         for r in roles:
@@ -1036,7 +1051,10 @@ def has_manage_guild(ctx: Context, event: dict) -> tuple[bool, str]:
                 level="error", tags=["trivium", "admin", "capability"],
                 request_id=request_id)
         return False, "denied_error_CapabilityError"
-    except (SdkError, RpcTimeoutError) as exc:
+    except Exception as exc:
+        # The runner wraps some Discord errors as RuntimeError (seen in
+        # 1.0.2 production). Catch broadly so we fail closed instead of
+        # crashing the handler.
         ctx.log(f"admin check: get_member failed: {exc}",
                 level="warning", tags=["trivium", "admin"],
                 request_id=request_id, exc_type=type(exc).__name__)
@@ -1386,14 +1404,50 @@ def trivia_root(ctx: Context, event: dict) -> None:
 # ──────────────────────────────────────────────────────────────────────────
 
 def cmd_leaderboard(ctx: Context, event: dict) -> None:
+    # 1.0.3: switched from ctx.kv.list_values to ctx.kv.list + ctx.kv.get_many.
+    # In v1.0.2 production list_values consistently returned empty for the
+    # "score:" prefix even when the keys clearly existed. list + get_many is
+    # more primitive and well-exercised by other plugins. get_many takes up
+    # to 50 keys per call so we batch.
     try:
-        all_scores = ctx.kv.list_values(prefix="score:", limit=1000) or {}
-    except SdkError:
-        all_scores = {}
+        keys = ctx.kv.list(prefix="score:", limit=1000) or []
+    except Exception as exc:
+        ctx.log(f"leaderboard: kv.list failed: {exc}",
+                level="warning", tags=["trivium", "leaderboard"],
+                exc_type=type(exc).__name__)
+        keys = []
+
+    all_scores: dict = {}
+    if keys:
+        # get_many caps at 50 — batch through the key list
+        for i in range(0, len(keys), 50):
+            chunk = keys[i:i + 50]
+            try:
+                got = ctx.kv.get_many(chunk) or {}
+            except Exception as exc:
+                ctx.log(f"leaderboard: kv.get_many failed: {exc}",
+                        level="warning", tags=["trivium", "leaderboard"],
+                        exc_type=type(exc).__name__, batch=i // 50)
+                continue
+            if isinstance(got, dict):
+                all_scores.update(got)
+
+    ctx.log("leaderboard fetched",
+            level="info", tags=["trivium", "leaderboard"],
+            key_count=len(keys), value_count=len(all_scores))
 
     rows: list[tuple[str, int, dict]] = []
     for key, val in all_scores.items():
-        if not isinstance(key, str) or not isinstance(val, dict):
+        if not isinstance(key, str):
+            continue
+        # In case the runtime returns JSON-encoded values rather than dicts,
+        # try to parse them. Belt-and-suspenders.
+        if isinstance(val, str):
+            try:
+                val = json.loads(val)
+            except (json.JSONDecodeError, ValueError):
+                continue
+        if not isinstance(val, dict):
             continue
         if ":" not in key:
             continue

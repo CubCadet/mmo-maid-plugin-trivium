@@ -86,6 +86,65 @@ def test_leaderboard_shows_accuracy_percentage():
     assert "50%" in desc
 
 
+# ── v1.0.3 regression: list + get_many path ────────────────────────────────
+
+def test_leaderboard_uses_list_plus_get_many_not_list_values():
+    """v1.0.2 production: ctx.kv.list_values returned empty for the score:
+    prefix even when keys existed. v1.0.3 switches to ctx.kv.list +
+    ctx.kv.get_many. This test pins the new implementation choice in place
+    by verifying the leaderboard works with seeded scores."""
+    ctx = MockContext()
+    _seed_score(ctx, "alice", score=100, correct=5, total=5)
+    _seed_score(ctx, "bob", score=80, correct=4, total=5)
+    event = make_event("interaction_create", interaction_type=2, user_id="someone")
+    cmd_leaderboard(ctx, event)
+    desc = ctx.interaction.responses[-1]["embeds"][0]["description"]
+    assert "<@alice>" in desc
+    assert "<@bob>" in desc
+
+
+def test_leaderboard_parses_json_string_values_defensively():
+    """If the v0.5.2 runtime returns score values as JSON strings (rather
+    than deserialized dicts), cmd_leaderboard should still recover."""
+    import json as _json
+    ctx = MockContext()
+    # Write a string-encoded value to simulate a quirky runtime response.
+    ctx.kv.set(kv_score("u1"), _json.dumps({
+        "score": 42, "correct": 3, "total": 5,
+        "streak_current": 1, "streak_best": 2, "last_played_ts": 0,
+    }))
+    event = make_event("interaction_create", interaction_type=2, user_id="someone")
+    cmd_leaderboard(ctx, event)
+    desc = ctx.interaction.responses[-1]["embeds"][0]["description"]
+    assert "<@u1>" in desc
+    assert "42" in desc
+
+
+def test_leaderboard_batches_get_many_over_50_key_chunks():
+    """get_many caps at 50 keys per call. Verify cmd_leaderboard batches."""
+    ctx = MockContext()
+    for i in range(120):
+        _seed_score(ctx, f"u{i:03d}", score=1000 - i, correct=1, total=1)
+    event = make_event("interaction_create", interaction_type=2, user_id="someone")
+    cmd_leaderboard(ctx, event)
+    desc = ctx.interaction.responses[-1]["embeds"][0]["description"]
+    # u000 has the highest score → appears
+    assert "<@u000>" in desc
+    # The top 10 cap still applies — u099 should not appear
+    assert "<@u099>" not in desc
+
+
+def test_leaderboard_emits_diagnostic_log_with_counts():
+    """v1.0.3 adds a "leaderboard fetched" info log so ops can see what
+    list and get_many actually returned. Don't accidentally remove it."""
+    ctx = MockContext()
+    _seed_score(ctx, "u1", score=50, correct=1, total=1)
+    event = make_event("interaction_create", interaction_type=2, user_id="someone")
+    cmd_leaderboard(ctx, event)
+    assert any("leaderboard fetched" in e.get("message", "")
+               for e in ctx.log_entries)
+
+
 # ── /trivia stats ──────────────────────────────────────────────────────────
 
 def test_stats_self_with_no_record_returns_zeros():
