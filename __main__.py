@@ -45,6 +45,7 @@ from datetime import datetime, timezone
 from mmo_maid_sdk import (
     ActionRow,
     Button,
+    CapabilityError,
     Context,
     KvQuotaError,
     Plugin,
@@ -52,6 +53,11 @@ from mmo_maid_sdk import (
     RpcTimeoutError,
     SdkError,
 )
+
+# Module-level version constant. Kept in sync with manifest.json by a regression
+# test in tests/test_meta.py. Used in the on_ready log because ctx.version is
+# empty under v0.5.2 pool-mode workers.
+__version__ = "1.0.2"
 
 plugin = Plugin()
 
@@ -237,6 +243,13 @@ def make_request_id() -> str:
 # Untimed KV keys
 KV_CONFIG = "cfg:server"
 KV_OTDB_TOKEN = "otdb:session_token"
+KV_ADMIN_CACHE = "cache:admin"          # {owner_id, roles_by_id, fetched_at}
+
+# Admin gate cache lifetime. Short enough that newly-granted MANAGE_GUILD
+# propagates within ~10 min; long enough to absorb burst use without hitting
+# the Discord 60-actions/min cap. Invalidating on guild_role_* events is a
+# v1.0.3 follow-up.
+ADMIN_CACHE_TTL = 600
 
 
 def kv_score(user_id: str) -> str:
@@ -886,33 +899,161 @@ def finalize_round(ctx: Context, *, game_id: str, inflight: dict,
 # Permission check — for /trivia config
 # ──────────────────────────────────────────────────────────────────────────
 
-def has_manage_guild(event: dict) -> tuple[bool, str]:
-    """Return (allowed, source). Layered defense:
+def _check_member_perms_int(perms) -> bool | None:
+    """Return True/False if perms is parseable; None if unparseable."""
+    try:
+        if isinstance(perms, str):
+            p = int(perms)
+        elif isinstance(perms, int):
+            p = perms
+        else:
+            return None
+    except (ValueError, TypeError):
+        return None
+    return bool(p & PERM_ADMINISTRATOR or p & PERM_MANAGE_GUILD)
 
-      1. Manifest declares default_member_permissions: "32" on /trivia config,
-         so Discord filters access before the interaction reaches us.
-      2. If event["member"]["permissions"] is present, double-check the bit.
-      3. If the field isn't exposed (SDK version-dependent), trust the
-         manifest gate.
+
+def _load_admin_cache(ctx: Context) -> dict | None:
+    """Read the admin cache. Returns None if missing, stale, or malformed."""
+    raw = ctx.kv.get(KV_ADMIN_CACHE)
+    if not isinstance(raw, dict):
+        return None
+    fetched_at = int(raw.get("fetched_at") or 0)
+    if int(time.time()) - fetched_at >= ADMIN_CACHE_TTL:
+        return None
+    if not isinstance(raw.get("owner_id"), str):
+        return None
+    if not isinstance(raw.get("roles_by_id"), dict):
+        return None
+    return raw
+
+
+def _refresh_admin_cache(ctx: Context, *, request_id: str = "") -> dict | None:
+    """Call ctx.discord.get_guild() + list_roles() and write the cache.
+    Returns the freshly-built cache dict, or None on Discord failure."""
+    try:
+        guild = ctx.discord.get_guild()
+    except (SdkError, RpcTimeoutError) as exc:
+        ctx.log(f"admin cache refresh: get_guild failed: {exc}",
+                level="warning", tags=["trivium", "admin"],
+                request_id=request_id, exc_type=type(exc).__name__)
+        return None
+    try:
+        roles = ctx.discord.list_roles()
+    except (SdkError, RpcTimeoutError) as exc:
+        ctx.log(f"admin cache refresh: list_roles failed: {exc}",
+                level="warning", tags=["trivium", "admin"],
+                request_id=request_id, exc_type=type(exc).__name__)
+        return None
+    owner_id = str(guild.get("owner_id") or "") if isinstance(guild, dict) else ""
+    roles_by_id: dict[str, int] = {}
+    if isinstance(roles, list):
+        for r in roles:
+            if not isinstance(r, dict):
+                continue
+            rid = r.get("id")
+            perms = r.get("permissions")
+            if not isinstance(rid, (str, int)):
+                continue
+            try:
+                if isinstance(perms, str):
+                    pi = int(perms)
+                elif isinstance(perms, int):
+                    pi = perms
+                else:
+                    pi = 0
+            except (ValueError, TypeError):
+                pi = 0
+            roles_by_id[str(rid)] = pi
+    cache = {
+        "owner_id": owner_id,
+        "roles_by_id": roles_by_id,
+        "fetched_at": int(time.time()),
+    }
+    try:
+        ctx.kv.set(KV_ADMIN_CACHE, cache, ttl_seconds=ADMIN_CACHE_TTL + 60)
+    except KvQuotaError:
+        pass
+    return cache
+
+
+def has_manage_guild(ctx: Context, event: dict) -> tuple[bool, str]:
+    """Return (allowed, source) for /trivia config. Three layers, fail-closed.
+
+    Layer A (no API call):
+        If event["member"]["permissions"] is present, decide from that.
+        v0.5.2 doesn't actually expose this field on interaction_create —
+        this branch is forward-compat. Kept first so tests that supply
+        member.permissions don't pay for Discord calls they don't need.
+
+    Layer B (cached):
+        Read KV_ADMIN_CACHE. If user is the guild owner → allow. Otherwise
+        fetch member roles via ctx.discord.get_member, union their
+        permissions from the cached roles_by_id map, check the bit.
+
+    Layer C (cold):
+        If the cache is missing or stale, call ctx.discord.get_guild() +
+        list_roles() once each, populate, then fall through to Layer B
+        logic.
+
+    Fail-closed: any unhandled SDK error → (False, "denied_error_<type>").
     """
+    request_id = make_request_id()
+    user_id = str(event.get("user_id") or "")
+
+    # Layer A — free, no Discord call
     member = event.get("member")
     if isinstance(member, dict):
-        perms = member.get("permissions")
-        p: int | None
+        verdict = _check_member_perms_int(member.get("permissions"))
+        if verdict is True:
+            return True, "member_perms"
+        if verdict is False:
+            return False, "no_perms_member"
+
+    # Layer C — refresh cache if missing/stale
+    cache = _load_admin_cache(ctx)
+    if cache is None:
         try:
-            if isinstance(perms, str):
-                p = int(perms)
-            elif isinstance(perms, int):
-                p = perms
-            else:
-                p = None
-        except (ValueError, TypeError):
-            p = None
-        if p is not None:
-            if p & PERM_ADMINISTRATOR or p & PERM_MANAGE_GUILD:
-                return True, "member.permissions"
-            return False, "member.permissions"
-    return True, "manifest_default"
+            cache = _refresh_admin_cache(ctx, request_id=request_id)
+        except CapabilityError:
+            ctx.log("admin check requires discord:read but it's not granted",
+                    level="error", tags=["trivium", "admin", "capability"],
+                    request_id=request_id)
+            return False, "denied_error_CapabilityError"
+        if cache is None:
+            return False, "denied_error_no_cache"
+
+    # Layer B — owner shortcut
+    owner_id = str(cache.get("owner_id") or "")
+    if owner_id and user_id == owner_id:
+        return True, "guild_owner"
+
+    # Layer B — role permissions union
+    try:
+        m = ctx.discord.get_member(user_id=user_id)
+    except CapabilityError:
+        ctx.log("admin check requires discord:read but it's not granted",
+                level="error", tags=["trivium", "admin", "capability"],
+                request_id=request_id)
+        return False, "denied_error_CapabilityError"
+    except (SdkError, RpcTimeoutError) as exc:
+        ctx.log(f"admin check: get_member failed: {exc}",
+                level="warning", tags=["trivium", "admin"],
+                request_id=request_id, exc_type=type(exc).__name__)
+        return False, f"denied_error_{type(exc).__name__}"
+    if not isinstance(m, dict):
+        return False, "denied_error_no_member"
+    member_roles = m.get("roles")
+    if not isinstance(member_roles, list):
+        return False, "no_perms_no_roles"
+    roles_by_id = cache.get("roles_by_id") or {}
+    union_perms = 0
+    for rid in member_roles:
+        if isinstance(rid, (str, int)):
+            union_perms |= int(roles_by_id.get(str(rid), 0) or 0)
+    if union_perms & PERM_ADMINISTRATOR or union_perms & PERM_MANAGE_GUILD:
+        return True, "role_perms"
+    return False, "no_perms_roles"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1061,6 +1202,29 @@ def cmd_play(ctx: Context, event: dict, opts: dict) -> None:
         content=f"Round started — click an answer above! (Round `{game_id}`)",
         ephemeral=True,
     )
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Daily backstop on message_create — pool-mode safety net
+# ──────────────────────────────────────────────────────────────────────────
+#
+# In pool mode @plugin.schedule may never fire. The cmd_play backstop covers
+# servers where someone plays trivia after the configured daily time; this
+# message_create handler covers servers where the daily channel sees normal
+# chat traffic but nobody plays. _maybe_post_daily short-circuits cheaply
+# when daily isn't configured or has already posted today, so firing it on
+# every message is bounded by a single ctx.kv.exists + ephemeral.dedup check.
+
+@plugin.on_event("message_create")
+def daily_backstop_on_message(ctx: Context, event: dict) -> None:
+    if event.get("author_bot"):
+        return
+    try:
+        _maybe_post_daily(ctx, request_id=make_request_id())
+    except Exception as exc:
+        ctx.log(f"daily message-backstop suppressed: {exc}",
+                level="warning", tags=["trivium", "daily"],
+                exc_type=type(exc).__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1336,7 +1500,7 @@ def cmd_daily(ctx: Context, event: dict) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# /trivia config (admin-only via default_member_permissions + has_manage_guild)
+# /trivia config (admin-only via has_manage_guild + discord:read)
 # ──────────────────────────────────────────────────────────────────────────
 
 CONFIG_HELP = (
@@ -1356,8 +1520,13 @@ HHMM_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 
 def cmd_config(ctx: Context, event: dict, opts: dict) -> None:
-    allowed, _src = has_manage_guild(event)
+    allowed, src = has_manage_guild(ctx, event)
     if not allowed:
+        # Log the denial source so ops can see why a "legitimate" admin
+        # got rejected (cache miss, Discord error, role lookup failure, etc.)
+        ctx.log("trivia config denied",
+                level="info", tags=["trivium", "admin"],
+                user_id=str(event.get("user_id") or ""), source=src)
         ctx.interaction.respond(
             content="You need the **Manage Server** permission to run this.",
             ephemeral=True,
@@ -1514,10 +1683,16 @@ def daily_tick(ctx: Context) -> None:
     """Every 60s, check whether it's time to post today's daily.
 
     Pool-mode caveat: @plugin.schedule may not fire. The opportunistic
-    backstop _maybe_post_daily() call in cmd_play covers servers that have
-    at least one /trivia play event after the configured daily time. The
+    backstop _maybe_post_daily() call in cmd_play and the message_create
+    handler below both cover servers where the schedule is silent. The
     ephemeral dedup gate on "dedup:daily:{date}" prevents double-posts
-    whichever path fires."""
+    whichever path fires.
+
+    The "daily_tick fired" diagnostic log is intentional — grep production
+    logs for this line over 24h to confirm whether pool-mode schedules
+    actually run on this install."""
+    ctx.log("daily_tick fired",
+            level="info", tags=["trivium", "daily", "diagnostic"])
     try:
         _maybe_post_daily(ctx, request_id=make_request_id())
     except Exception as exc:
@@ -1670,8 +1845,13 @@ def on_install(ctx: Context) -> None:
 
 @plugin.on_ready
 def on_ready(ctx: Context) -> None:
-    ctx.log(f"trivium v{ctx.version} ready on server {ctx.server_id}",
-            level="info", tags=["trivium", "lifecycle"])
+    # Prefer the module-level __version__ since ctx.version is empty under
+    # v0.5.2 pool-mode workers. Log both so future drift is visible.
+    ctx.log(
+        f"trivium v{__version__} ready on server {ctx.server_id} "
+        f"(ctx.version={ctx.version or 'unset'})",
+        level="info", tags=["trivium", "lifecycle"],
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────

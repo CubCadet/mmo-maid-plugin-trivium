@@ -1,12 +1,13 @@
 {
   "id": "trivium",
   "name": "Trivium",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Multiple-choice trivia rounds played via Discord buttons, with per-server leaderboards, per-user streaks, and admin-scheduled daily trivia. Questions are sourced from Open Trivia DB with The Trivia API as fallback.",
   "author": "CubCadet",
   "tags": ["trivia", "games", "fun", "engagement", "daily"],
   "capabilities_required": [
     "discord:edit_message",
+    "discord:read",
     "discord:send_message",
     "interaction:respond",
     "proxy:http",
@@ -99,7 +100,6 @@
           "name": "config",
           "description": "Configure trivia (admin only).",
           "type": 1,
-          "default_member_permissions": "32",
           "options": [
             {
               "name": "action",

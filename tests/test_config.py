@@ -1,5 +1,6 @@
-"""Tests for /trivia config — admin permission check (both layers from
-SDK ambiguity #1), config sub-action routing, value validation."""
+"""Tests for /trivia config — admin permission spot-checks, config
+sub-action routing, value validation. The full admin-gate matrix lives in
+tests/test_admin_gate.py."""
 from __future__ import annotations
 
 from mmo_maid_sdk.testing import MockContext, make_event
@@ -15,45 +16,34 @@ from plugin_main import (
 )
 
 
-# ── has_manage_guild — defense layers ──────────────────────────────────────
+# ── has_manage_guild — Layer A spot-checks ────────────────────────────────
+# Comprehensive coverage of Layers A/B/C is in tests/test_admin_gate.py.
+# This file checks Layer A only (the cheap, no-Discord-call path) since
+# every existing /trivia config test below supplies member.permissions.
 
 def test_perms_present_as_int_with_manage_guild_bit():
+    ctx = MockContext()
     event = {"user_id": "u1", "member": {"permissions": PERM_MANAGE_GUILD}}
-    allowed, src = has_manage_guild(event)
+    allowed, src = has_manage_guild(ctx, event)
     assert allowed is True
-    assert src == "member.permissions"
+    assert src == "member_perms"
 
 
 def test_perms_present_as_string_with_administrator_bit():
     """Discord can send permissions as a stringified int. Coerce defensively."""
+    ctx = MockContext()
     event = {"user_id": "u1", "member": {"permissions": str(PERM_ADMINISTRATOR)}}
-    allowed, src = has_manage_guild(event)
+    allowed, src = has_manage_guild(ctx, event)
     assert allowed is True
-    assert src == "member.permissions"
+    assert src == "member_perms"
 
 
 def test_perms_present_without_required_bit_denied():
+    ctx = MockContext()
     event = {"user_id": "u1", "member": {"permissions": 0x4}}   # SEND_MESSAGES only
-    allowed, src = has_manage_guild(event)
+    allowed, src = has_manage_guild(ctx, event)
     assert allowed is False
-    assert src == "member.permissions"
-
-
-def test_perms_missing_falls_back_to_manifest_default():
-    """If member.permissions isn't exposed by the SDK, trust the manifest's
-    default_member_permissions filter (Discord enforces it before the
-    interaction reaches us)."""
-    event = {"user_id": "u1"}        # no "member" key
-    allowed, src = has_manage_guild(event)
-    assert allowed is True
-    assert src == "manifest_default"
-
-
-def test_perms_malformed_falls_back_to_manifest_default():
-    event = {"user_id": "u1", "member": {"permissions": "not-a-number"}}
-    allowed, src = has_manage_guild(event)
-    assert allowed is True
-    assert src == "manifest_default"
+    assert src == "no_perms_member"
 
 
 # ── /trivia config show ────────────────────────────────────────────────────

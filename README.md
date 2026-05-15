@@ -19,6 +19,7 @@ This plugin lands in the **Safe** tier. Each capability is requested for a speci
 | Capability | Tier | Why |
 |---|---|---|
 | `discord:edit_message` | Safe | Reveal the answer in the round embed after a correct (or wrong) click. |
+| `discord:read` | Safe | Look up guild owner and role permissions to enforce admin-only access on `/trivia config`. |
 | `discord:send_message` | Safe | Post the round embed for `/trivia play` and the daily question. |
 | `interaction:respond` | Safe | Slash-command replies + ephemeral feedback on button clicks. (Auto-added by the runtime; listed for transparency.) |
 | `proxy:http` | Safe | Fetch trivia questions from `opentdb.com` and `the-trivia-api.com`. |
@@ -34,7 +35,7 @@ This plugin lands in the **Safe** tier. Each capability is requested for a speci
 | `/trivia daily` | Show today's daily trivia status (or how to configure if it isn't set). | Anyone |
 | `/trivia config <action> [value]` | Configure daily channel, time, default difficulty, timer (10–60s), mode (single/open), daily category. | Admin (Manage Server) |
 
-`/trivia config` is gated by Discord's `default_member_permissions` field (MANAGE_GUILD bit). The plugin also re-checks the requesting member's permission bit inside the handler as a belt-and-suspenders defense.
+`/trivia config` is gated in-handler by `has_manage_guild`, which (a) trusts `event["member"]["permissions"]` when the runtime exposes it, (b) falls back to looking up the guild owner ID + the requesting member's role permissions via `discord:read` (cached in KV for 10 minutes), and (c) fails closed if every check is inconclusive. The cache invalidates naturally on TTL expiry, so newly-granted MANAGE_GUILD propagates within ~10 minutes.
 
 ## Known limitations (v1)
 

@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone, timedelta
 
-from mmo_maid_sdk.testing import MockContext
+from mmo_maid_sdk.testing import MockContext, make_event
 
 from plugin_main import (
     DEFAULT_CONFIG,
     KV_CONFIG,
     _maybe_post_daily,
+    daily_backstop_on_message,
     daily_tick,
     eph_dedup_daily,
     get_config,
@@ -188,3 +189,65 @@ def test_no_post_when_time_is_future():
     # window minimizes that, but acknowledge it.
     if future.day == datetime.now(timezone.utc).day:
         assert ctx.messages_sent == []
+
+
+# ── daily_tick diagnostic log ──────────────────────────────────────────────
+
+def test_daily_tick_emits_diagnostic_log():
+    """The 'daily_tick fired' diagnostic line is intentional — it tells ops
+    whether @plugin.schedule actually runs in pool mode. Don't accidentally
+    remove or rename it."""
+    ctx = MockContext()
+    daily_tick(ctx)
+    messages = [e.get("message", "") for e in ctx.log_entries]
+    assert any("daily_tick fired" in m for m in messages), \
+        "daily_tick must emit the production-diagnostic log line"
+
+
+# ── message_create backstop ────────────────────────────────────────────────
+
+def test_message_backstop_no_op_when_not_configured():
+    """No daily channel set → backstop is a silent no-op."""
+    ctx = MockContext()
+    event = make_event("message_create", content="hello", author_bot=False)
+    daily_backstop_on_message(ctx, event)
+    assert ctx.messages_sent == []
+
+
+def test_message_backstop_ignores_bot_authors():
+    """Bot authors get skipped to prevent loop scenarios."""
+    ctx = MockContext()
+    _seed_cfg(ctx, time_utc="00:00")
+    event = make_event("message_create", content="hi", author_bot=True)
+    daily_backstop_on_message(ctx, event)
+    # _maybe_post_daily would have posted if it had been called; it wasn't
+    assert ctx.messages_sent == []
+
+
+def test_message_backstop_triggers_post_when_time_passed():
+    """If daily is configured, time has passed, and no daily history exists,
+    a non-bot message triggers the daily post."""
+    ctx = MockContext()
+    _seed_cfg(ctx, time_utc="00:00")
+    ctx.http.mock_response("api_token.php", status=200,
+                           body='{"response_code": 0, "token": "T"}')
+    ctx.http.mock_response("api.php", status=200, body=_otdb_body())
+    event = make_event("message_create", content="hello", author_bot=False)
+    daily_backstop_on_message(ctx, event)
+    assert len(ctx.messages_sent) == 1
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    assert isinstance(ctx.kv.get(kv_daily(today)), dict)
+
+
+def test_message_backstop_short_circuits_when_already_posted():
+    """If today's daily already exists in KV, the backstop is cheap and
+    doesn't make any HTTP calls."""
+    ctx = MockContext()
+    _seed_cfg(ctx, time_utc="00:00")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ctx.kv.set(kv_daily(today), {"posted_at": 100})
+    event = make_event("message_create", content="hello", author_bot=False)
+    daily_backstop_on_message(ctx, event)
+    # No HTTP requests, no messages sent
+    assert ctx.http.requests == []
+    assert ctx.messages_sent == []
