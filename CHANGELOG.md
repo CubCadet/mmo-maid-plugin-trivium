@@ -1,0 +1,72 @@
+# Changelog
+
+All notable changes to this plugin will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+Version-bump policy, tied to `manifest.json`:
+
+- **MAJOR** (`1.x.y → 2.0.0`) — added a Dangerous capability, removed a slash
+  command, breaking KV/SQL schema change.
+- **MINOR** (`1.0.x → 1.1.0`) — new slash command, new event handler, additive
+  KV/SQL columns.
+- **PATCH** (`1.0.0 → 1.0.1`) — bug fix, internal refactor, docs/CI changes.
+
+The tag in GitHub (`v1.2.3`) must match the `version` field in `manifest.json`.
+CI enforces this during release builds.
+
+---
+
+## [Unreleased]
+
+## [1.0.0] - 2026-05-15
+
+### Added
+- Initial release of Trivium — multiple-choice trivia for MMO Maid.
+- `/trivia play [category] [difficulty]` — start a round in one of 24
+  categories at easy/medium/hard/any difficulty. Per-user 3-second cooldown.
+- `/trivia leaderboard` — top 10 scores for the server.
+- `/trivia stats [user]` — lifetime stats; viewing other users' stats is
+  open by default.
+- `/trivia daily` — show today's daily trivia status.
+- `/trivia config <action> [value]` — admin-only configuration of daily
+  channel, daily UTC time, default difficulty, answer timer (10–60s), mode
+  (single/open), and daily category.
+- Single-player mode: only the user who started the round can answer.
+- Open mode: any server member can answer; the first-correct click wins
+  via a Redis-backed dedup gate.
+- Per-server leaderboard backed by KV (`score:{user_id}` records score,
+  correct, total, streak_current, streak_best, last_played_ts).
+- Daily trivia: posts a 1-hour open round at a configured UTC time, with
+  a +50 bonus for the first correct answerer. Idempotency-guarded by an
+  ephemeral dedup key on `dedup:daily:{YYYY-MM-DD}`.
+- Two-source fetcher chain: Open Trivia DB (primary, with per-server
+  session-token suppression) and The Trivia API (fallback, plain-unicode).
+- Lazy-reset OTDB token strategy: on `response_code=4` (combo exhausted
+  under the current token), Trivium falls through to The Trivia API
+  without resetting the token, preserving suppression for the other 23
+  categories. Token's 6-hour idle timeout rolls naturally.
+- Versioned question-batch cache (`v=1`, 24-hour TTL) keyed by
+  source + category + difficulty.
+- 200-entry per-category seen-ring suppresses recent repeats across
+  sources.
+- Typed negative-cache reasons with per-reason TTLs
+  (RATE_LIMITED 600s, NO_QUESTIONS 1800s, TOKEN_EXHAUSTED 7200s, etc.).
+- HTML-entity decoding applied at the OTDB adapter only — preserves
+  legitimate "&" in The Trivia API responses.
+- Display scrubber neutralizes bidi controls, `@everyone`/`@here`,
+  backticks, and masked-link markdown in user-visible question text.
+- Custom_id schema with explicit version prefix (`triv:1:{game_id}:{idx}`)
+  so stale buttons across a deploy decode to "this round has expired"
+  rather than misbehaving.
+- 119-test pytest suite covering safety, sources, cache, game flow,
+  scheduler, config, and leaderboard.
+
+### Known limitations
+- Round embed doesn't auto-reveal the answer on timeout (no winner click).
+  Pool-mode workers may not run `@plugin.schedule`, so we don't rely on
+  background ticks for round timeout. Documented in the README.
+- The SDK's `edit_message` in v0.5.2 doesn't accept a `components` arg,
+  so the round buttons stay clickable after the answer is revealed. Late
+  clicks are caught gracefully by the "round has ended" guard.

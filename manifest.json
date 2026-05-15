@@ -1,0 +1,130 @@
+{
+  "id": "trivium",
+  "name": "Trivium",
+  "version": "1.0.0",
+  "description": "Multiple-choice trivia rounds played via Discord buttons, with per-server leaderboards, per-user streaks, and admin-scheduled daily trivia. Questions are sourced from Open Trivia DB with The Trivia API as fallback.",
+  "author": "CubCadet",
+  "tags": ["trivia", "games", "fun", "engagement", "daily"],
+  "capabilities_required": [
+    "discord:edit_message",
+    "discord:send_message",
+    "interaction:respond",
+    "proxy:http",
+    "storage:kv"
+  ],
+  "proxy_domains_requested": [
+    "opentdb.com",
+    "the-trivia-api.com"
+  ],
+  "slash_commands": [
+    {
+      "name": "trivia",
+      "description": "Play trivia, check stats, view the leaderboard, or configure (admin).",
+      "options": [
+        {
+          "name": "play",
+          "description": "Start a trivia round.",
+          "type": 1,
+          "options": [
+            {
+              "name": "category",
+              "description": "Question category (defaults to General Knowledge).",
+              "type": 3,
+              "required": false,
+              "choices": [
+                {"name": "General Knowledge",      "value": "General Knowledge"},
+                {"name": "Books",                  "value": "Books"},
+                {"name": "Film",                   "value": "Film"},
+                {"name": "Music",                  "value": "Music"},
+                {"name": "Musicals & Theatres",    "value": "Musicals & Theatres"},
+                {"name": "Television",             "value": "Television"},
+                {"name": "Video Games",            "value": "Video Games"},
+                {"name": "Board Games",            "value": "Board Games"},
+                {"name": "Science & Nature",       "value": "Science & Nature"},
+                {"name": "Computers",              "value": "Computers"},
+                {"name": "Mathematics",            "value": "Mathematics"},
+                {"name": "Mythology",              "value": "Mythology"},
+                {"name": "Sports",                 "value": "Sports"},
+                {"name": "Geography",              "value": "Geography"},
+                {"name": "History",                "value": "History"},
+                {"name": "Politics",               "value": "Politics"},
+                {"name": "Art",                    "value": "Art"},
+                {"name": "Celebrities",            "value": "Celebrities"},
+                {"name": "Animals",                "value": "Animals"},
+                {"name": "Vehicles",               "value": "Vehicles"},
+                {"name": "Comics",                 "value": "Comics"},
+                {"name": "Gadgets",                "value": "Gadgets"},
+                {"name": "Anime & Manga",          "value": "Anime & Manga"},
+                {"name": "Cartoons & Animations", "value": "Cartoons & Animations"}
+              ]
+            },
+            {
+              "name": "difficulty",
+              "description": "Question difficulty (defaults to any).",
+              "type": 3,
+              "required": false,
+              "choices": [
+                {"name": "Any",    "value": "any"},
+                {"name": "Easy",   "value": "easy"},
+                {"name": "Medium", "value": "medium"},
+                {"name": "Hard",   "value": "hard"}
+              ]
+            }
+          ]
+        },
+        {
+          "name": "leaderboard",
+          "description": "Show the top 10 trivia scores for this server.",
+          "type": 1
+        },
+        {
+          "name": "stats",
+          "description": "Show lifetime trivia stats (yours or someone else's).",
+          "type": 1,
+          "options": [
+            {
+              "name": "user",
+              "description": "Whose stats to show (defaults to yourself).",
+              "type": 6,
+              "required": false
+            }
+          ]
+        },
+        {
+          "name": "daily",
+          "description": "Show today's daily trivia question (if posted).",
+          "type": 1
+        },
+        {
+          "name": "config",
+          "description": "Configure trivia (admin only).",
+          "type": 1,
+          "default_member_permissions": "32",
+          "options": [
+            {
+              "name": "action",
+              "description": "What to configure.",
+              "type": 3,
+              "required": true,
+              "choices": [
+                {"name": "show",       "value": "show"},
+                {"name": "channel",    "value": "channel"},
+                {"name": "time",       "value": "time"},
+                {"name": "difficulty", "value": "difficulty"},
+                {"name": "timer",      "value": "timer"},
+                {"name": "mode",       "value": "mode"},
+                {"name": "category",   "value": "category"}
+              ]
+            },
+            {
+              "name": "value",
+              "description": "The new value (depends on action; see /trivia config action:show).",
+              "type": 3,
+              "required": false
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
