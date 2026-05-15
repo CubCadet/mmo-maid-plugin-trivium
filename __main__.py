@@ -57,7 +57,7 @@ from mmo_maid_sdk import (
 # Module-level version constant. Kept in sync with manifest.json by a regression
 # test in tests/test_meta.py. Used in the on_ready log because ctx.version is
 # empty under v0.5.2 pool-mode workers.
-__version__ = "1.0.4"
+__version__ = "1.0.5"
 
 plugin = Plugin()
 
@@ -1643,19 +1643,17 @@ def cmd_config(ctx: Context, event: dict, opts: dict) -> None:
     raw_value = opts.get("value")
     cfg = get_config(ctx)
 
-    # 1.0.4: admin-bootstrap is the only action that DOESN'T require the
-    # gate. It's a one-shot "claim admin while nobody is admin yet"
-    # command. Race-prone in theory (any user could claim first); in
-    # practice the server installer runs it immediately after install and
-    # wins. Logged at info-level for auditability.
-    if action == "admin-bootstrap":
+    # 1.0.5: admin actions use hyphenless value strings ("adminbootstrap"
+    # etc.) so Discord re-registers the choices and avoids any potential
+    # hyphen-related cache quirk that left v1.0.4 admin-* invisible. We
+    # also accept the v1.0.4 hyphenated values so a stale Discord cache
+    # delivering the old strings still works during the transition.
+    if action in ("adminbootstrap", "admin-bootstrap"):
         _config_admin_bootstrap(ctx, event, cfg)
         return
 
     allowed, src = has_manage_guild(ctx, event)
     if not allowed:
-        # Log the denial source so ops can see why a "legitimate" admin
-        # got rejected (cache miss, Discord error, role lookup failure, etc.)
         ctx.log("trivia config denied",
                 level="info", tags=["trivium", "admin"],
                 user_id=str(event.get("user_id") or ""), source=src)
@@ -1683,11 +1681,11 @@ def cmd_config(ctx: Context, event: dict, opts: dict) -> None:
         _config_set_mode(ctx, cfg, raw_value)
     elif action == "category":
         _config_set_category(ctx, cfg, raw_value)
-    elif action == "admin-list":
+    elif action in ("adminlist", "admin-list"):
         _config_admin_list(ctx, cfg)
-    elif action == "admin-add":
+    elif action in ("adminadd", "admin-add"):
         _config_admin_add(ctx, cfg, raw_value)
-    elif action == "admin-remove":
+    elif action in ("adminremove", "admin-remove"):
         _config_admin_remove(ctx, event, cfg, raw_value)
     else:
         ctx.interaction.respond(content=CONFIG_HELP, ephemeral=True)

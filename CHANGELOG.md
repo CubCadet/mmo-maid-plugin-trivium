@@ -20,6 +20,39 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [1.0.5] - 2026-05-15
+
+### Fixed
+- **`/trivia config action:admin-bootstrap` and the other admin actions
+  weren't selectable in Discord's dropdown.** v1.0.4 logs confirmed
+  Discord still served the v1.0.3 choice list (only show/channel/time/
+  difficulty/timer/mode/category) — the new manifest with hyphenated
+  `admin-*` values hadn't propagated. Either Discord cached the old
+  command tree or the platform didn't re-register on plain upgrade.
+- 1.0.5 renames the four admin choice **values** to hyphenless strings
+  (`adminbootstrap`, `adminlist`, `adminadd`, `adminremove`). The
+  user-facing choice **names** keep the hyphenated form (Discord's
+  dropdown shows `admin-bootstrap` etc., which is what users type).
+  Net effect: a fresh manifest, distinct from v1.0.4's, that Discord
+  has to re-register.
+- The `cmd_config` dispatch accepts **both** old (hyphenated) and new
+  (hyphenless) value strings for the transition window, so any stale
+  Discord cache delivering the v1.0.4 strings continues to work.
+
+### Why this works
+- A manifest with new choice values forces Discord to refresh its
+  cached command tree on the next interaction.
+- The hyphenless values sidestep any Discord-side restriction on
+  hyphens in choice values (I haven't fully ruled out as the original
+  cause).
+- Dual-spelling dispatch eliminates the lock-out window between
+  redeploy and Discord cache refresh.
+
+### Verification path
+- After deploy, `/trivia config action:` dropdown should now include
+  the four admin actions. If still missing, the issue is platform-side
+  slash-command registration (not the plugin).
+
 ## [1.0.4] - 2026-05-15
 
 ### Changed

@@ -1,7 +1,7 @@
 {
   "id": "trivium",
   "name": "Trivium",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Multiple-choice trivia rounds played via Discord buttons, with per-server leaderboards, per-user streaks, and admin-scheduled daily trivia. Questions are sourced from Open Trivia DB with The Trivia API as fallback.",
   "author": "CubCadet",
   "tags": ["trivia", "games", "fun", "engagement", "daily"],
@@ -114,10 +114,10 @@
                 {"name": "timer",             "value": "timer"},
                 {"name": "mode",              "value": "mode"},
                 {"name": "category",          "value": "category"},
-                {"name": "admin-bootstrap",   "value": "admin-bootstrap"},
-                {"name": "admin-list",        "value": "admin-list"},
-                {"name": "admin-add",         "value": "admin-add"},
-                {"name": "admin-remove",      "value": "admin-remove"}
+                {"name": "admin-bootstrap",   "value": "adminbootstrap"},
+                {"name": "admin-list",        "value": "adminlist"},
+                {"name": "admin-add",         "value": "adminadd"},
+                {"name": "admin-remove",      "value": "adminremove"}
               ]
             },
             {

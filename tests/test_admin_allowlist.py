@@ -258,3 +258,56 @@ def test_config_show_lists_admins():
     fields = {f["name"]: f["value"] for f in embed["fields"]}
     assert "Admins" in fields
     assert "<@111111111111111111>" in fields["Admins"]
+
+
+# ── v1.0.5: dispatch accepts hyphenless action values too ──────────────────
+# In v1.0.4 the manifest exposed admin actions as hyphenated values
+# ("admin-bootstrap" etc.), but Discord didn't pick up the new choices
+# (still served the v1.0.3 dropdown). v1.0.5 renames the values to
+# hyphenless strings ("adminbootstrap" etc.) so the new manifest forces a
+# re-registration. The dispatch accepts both spellings for safety in case
+# any Discord cache delivers the old strings during the transition.
+
+def test_dispatch_accepts_new_adminbootstrap_value():
+    """v1.0.5 hyphenless value 'adminbootstrap' bootstraps correctly."""
+    ctx = MockContext()
+    event = _event(user_id="newcomer")
+    cmd_config(ctx, event, {"action": "adminbootstrap"})
+    cfg = get_config(ctx)
+    assert cfg["admin_user_ids"] == ["newcomer"]
+
+
+def test_dispatch_accepts_old_adminbootstrap_value_for_compat():
+    """v1.0.4 hyphenated value 'admin-bootstrap' still works (stale-cache safety)."""
+    ctx = MockContext()
+    event = _event(user_id="newcomer")
+    cmd_config(ctx, event, {"action": "admin-bootstrap"})
+    cfg = get_config(ctx)
+    assert cfg["admin_user_ids"] == ["newcomer"]
+
+
+def test_dispatch_accepts_new_adminlist_value():
+    ctx = MockContext()
+    _seed_admin(ctx, "111111111111111111")
+    event = _event(user_id="111111111111111111")
+    cmd_config(ctx, event, {"action": "adminlist"})
+    last = ctx.interaction.responses[-1]
+    assert "<@111111111111111111>" in last["content"]
+
+
+def test_dispatch_accepts_new_adminadd_value():
+    ctx = MockContext()
+    _seed_admin(ctx, "existing")
+    event = _event(user_id="existing")
+    cmd_config(ctx, event, {"action": "adminadd", "value": "987654321098765432"})
+    cfg = get_config(ctx)
+    assert "987654321098765432" in cfg["admin_user_ids"]
+
+
+def test_dispatch_accepts_new_adminremove_value():
+    ctx = MockContext()
+    _seed_admin(ctx, "111111111111111111", "222222222222222222")
+    event = _event(user_id="111111111111111111")
+    cmd_config(ctx, event, {"action": "adminremove", "value": "222222222222222222"})
+    cfg = get_config(ctx)
+    assert "222222222222222222" not in cfg["admin_user_ids"]
