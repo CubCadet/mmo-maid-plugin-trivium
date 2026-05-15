@@ -164,7 +164,9 @@ def test_admin_add_dedupe_on_repeat():
 
 
 def test_admin_add_requires_admin_caller():
-    """Only existing admins can add more admins (gated by has_manage_guild)."""
+    """Only existing admins can add more admins (gated by has_manage_guild).
+    With an empty allowlist, the denial path shows the bootstrap button
+    rather than mentioning the admin-bootstrap slash sub-command."""
     ctx = MockContext()
     # No admins yet — the bootstrap branch is for setup; admin-add requires admin
     event = _event(user_id="rando")
@@ -172,7 +174,9 @@ def test_admin_add_requires_admin_caller():
     cfg = get_config(ctx)
     assert cfg["admin_user_ids"] == []        # unchanged
     last = ctx.interaction.responses[-1]
-    assert "admin-bootstrap" in last["content"]
+    # 1.0.6: empty-allowlist denial shows the claim-admin button
+    assert "claim admin" in last["content"].lower()
+    assert last.get("components"), "empty-allowlist denial must include the bootstrap button"
 
 
 # ── /trivia config action:admin-remove ─────────────────────────────────────
@@ -311,3 +315,88 @@ def test_dispatch_accepts_new_adminremove_value():
     cmd_config(ctx, event, {"action": "adminremove", "value": "222222222222222222"})
     cfg = get_config(ctx)
     assert "222222222222222222" not in cfg["admin_user_ids"]
+
+
+# ── v1.0.6: bootstrap-via-button when slash-command path is unreachable ───
+# The platform isn't pushing new slash-command choice values to Discord, so
+# admin-bootstrap isn't in the dropdown. The denial path in cmd_config now
+# attaches a one-time "Claim Trivium admin" button when the allowlist is
+# empty; clicking it bootstraps the user. Tests cover both the denial-side
+# (correct components attached) and the click-side (correct effect).
+
+from plugin_main import on_bootstrap_button     # button handler
+
+
+def _flatten_components(components) -> str:
+    """ActionRow/Button objects don't repr their inner state. Walk them via
+    .to_dict() (the SDK serialization hook the runtime uses) and JSON-stringify
+    so we can grep for custom_ids in tests."""
+    import json as _json
+    out = []
+    for c in components or []:
+        if hasattr(c, "to_dict"):
+            out.append(c.to_dict())
+        else:
+            out.append(c)
+    return _json.dumps(out, default=str)
+
+
+def test_denial_with_empty_allowlist_attaches_bootstrap_button():
+    ctx = MockContext()
+    # No admins set — Layer 0 falls through; no Discord mocks → fails closed
+    event = _event(user_id="rando")
+    cmd_config(ctx, event, {"action": "show"})
+    last = ctx.interaction.responses[-1]
+    assert last["ephemeral"] is True
+    assert "claim admin" in last["content"].lower()
+    # Components attached with the bootstrap button
+    components = last.get("components") or []
+    assert components, "denial with empty allowlist must attach a bootstrap button"
+    # The custom_id flows through to whatever the SDK serializes to Discord
+    flat = _flatten_components(components)
+    assert "triv-bootstrap:claim" in flat
+
+
+def test_denial_with_populated_allowlist_omits_bootstrap_button():
+    """When admins exist, the denial points to admin-add instead of showing
+    a claim button. Prevents stealing admin after bootstrap."""
+    ctx = MockContext()
+    _seed_admin(ctx, "111111111111111111")
+    event = _event(user_id="rando")
+    cmd_config(ctx, event, {"action": "show"})
+    last = ctx.interaction.responses[-1]
+    assert last["ephemeral"] is True
+    assert "admin-add" in last["content"]
+    # No components — no claim button when admins exist
+    components = last.get("components")
+    assert not components, "denial with populated allowlist must NOT attach a button"
+
+
+def test_bootstrap_button_click_claims_admin_when_empty():
+    ctx = MockContext()
+    event = _event(user_id="clicker")
+    # Simulate a component-click interaction
+    event["interaction_type"] = 3
+    event["custom_id"] = "triv-bootstrap:claim"
+    on_bootstrap_button(ctx, event)
+    cfg = get_config(ctx)
+    assert cfg["admin_user_ids"] == ["clicker"]
+    # Confirmation response
+    last = ctx.interaction.responses[-1]
+    assert "first Trivium admin" in last["content"]
+
+
+def test_bootstrap_button_click_refuses_when_already_bootstrapped():
+    """Stale ephemeral message from before someone else bootstrapped:
+    clicking still routes correctly and refuses, no state damage."""
+    ctx = MockContext()
+    _seed_admin(ctx, "preexisting_admin")
+    event = _event(user_id="opportunist")
+    event["interaction_type"] = 3
+    event["custom_id"] = "triv-bootstrap:claim"
+    on_bootstrap_button(ctx, event)
+    cfg = get_config(ctx)
+    # Still only the original admin
+    assert cfg["admin_user_ids"] == ["preexisting_admin"]
+    last = ctx.interaction.responses[-1]
+    assert "already configured" in last["content"]

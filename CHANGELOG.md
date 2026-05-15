@@ -20,6 +20,40 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-05-15
+
+### Fixed
+- **Bootstrap-via-button to unblock first-time admin setup.** v1.0.5
+  production confirmed that the MMO Maid platform isn't pushing manifest
+  slash-command choice updates to Discord — the dropdown still serves the
+  v1.0.3 choice list, even after a manifest with renamed values and a
+  full Discord client refresh. Until the platform fixes that, the
+  admin-bootstrap sub-command remains unreachable via slash.
+- 1.0.6 sidesteps the issue with a button: when `/trivia config action:`
+  denies a user and the admin allowlist is empty, the denial message now
+  includes a "Claim Trivium admin (one-time)" button. Clicking it runs
+  the same bootstrap logic. Buttons are delivered inline on the message
+  and don't require pre-registration, so this works regardless of
+  slash-command propagation state.
+- Once the platform fixes propagation, the slash path becomes available
+  too — this button stays as a UX nicety.
+
+### Added
+- `@plugin.on_component("triv-bootstrap:claim")` handler — exact-match
+  component routing, so it doesn't conflict with the existing dynamic
+  `triv:` game-button dispatcher.
+- 4 new tests covering denial-with-button, denial-without-button (when
+  admins exist), button-click-bootstraps, and button-click-refuses-when-
+  already-bootstrapped.
+
+### Diagnostic confirmed
+- v0.5.2 production `list_roles` returns role dicts **without a
+  `permissions` field at all** (`first_role_keys: "color,id,managed,
+  mentionable,name,position"` — no permissions). The Discord-based admin
+  path (Layers B/C) is permanently dead in v0.5.2, not just degraded.
+  Layer 0 (KV allowlist) is the only working gate; this release ensures
+  it can actually be seeded.
+
 ## [1.0.5] - 2026-05-15
 
 ### Fixed

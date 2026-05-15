@@ -57,7 +57,7 @@ from mmo_maid_sdk import (
 # Module-level version constant. Kept in sync with manifest.json by a regression
 # test in tests/test_meta.py. Used in the on_ready log because ctx.version is
 # empty under v0.5.2 pool-mode workers.
-__version__ = "1.0.5"
+__version__ = "1.0.6"
 
 plugin = Plugin()
 
@@ -1316,6 +1316,25 @@ def daily_backstop_on_message(ctx: Context, event: dict) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────
+# Bootstrap admin button (1.0.6) — fixed custom_id, exact-match handler
+# ──────────────────────────────────────────────────────────────────────────
+#
+# The admin-bootstrap slash sub-command isn't reachable in v1.0.4/v1.0.5
+# because the platform doesn't push manifest slash-command updates to
+# Discord. Buttons sidestep that — they're inline on a message and don't
+# need pre-registration. The denial path in cmd_config attaches a
+# "Claim Trivium admin (one-time)" button when the allowlist is empty;
+# this handler claims the clicking user via the same _config_admin_bootstrap
+# code path. Once the platform fixes slash-command registration, this
+# stays as a UX nicety alongside the slash path.
+
+@plugin.on_component("triv-bootstrap:claim")
+def on_bootstrap_button(ctx: Context, event: dict) -> None:
+    cfg = get_config(ctx)
+    _config_admin_bootstrap(ctx, event, cfg)
+
+
+# ──────────────────────────────────────────────────────────────────────────
 # Component dispatch — button clicks via @plugin.on_event("interaction_create")
 # (NOT @plugin.on_component because custom_ids are dynamic)
 # ──────────────────────────────────────────────────────────────────────────
@@ -1657,14 +1676,36 @@ def cmd_config(ctx: Context, event: dict, opts: dict) -> None:
         ctx.log("trivia config denied",
                 level="info", tags=["trivium", "admin"],
                 user_id=str(event.get("user_id") or ""), source=src)
-        ctx.interaction.respond(
-            content=(
-                "You need to be a Trivium admin to run this. "
-                "First-time setup: have the server admin run "
-                "`/trivia config action:admin-bootstrap` to claim admin."
-            ),
-            ephemeral=True,
-        )
+        # 1.0.6: the platform isn't propagating new slash-command choice
+        # values to Discord, so `/trivia config action:admin-bootstrap` is
+        # not selectable from the dropdown. Buttons sidestep that — they're
+        # delivered inline on the message, not pre-registered. When the
+        # allowlist is empty, attach a one-time bootstrap button to the
+        # denial message. Once the platform fixes propagation, the slash
+        # path becomes available too and this stays as a UX nicety.
+        admins = cfg.get("admin_user_ids") or []
+        if not isinstance(admins, list) or not admins:
+            ctx.interaction.respond(
+                content=(
+                    "Trivium has no admins configured yet. "
+                    "Click below to claim admin for this server (one-time)."
+                ),
+                ephemeral=True,
+                components=[ActionRow(Button(
+                    "Claim Trivium admin (one-time)",
+                    custom_id="triv-bootstrap:claim",
+                    style="success",
+                ))],
+            )
+        else:
+            ctx.interaction.respond(
+                content=(
+                    "You need to be a Trivium admin to run this command. "
+                    "Ask an existing admin to add you via `/trivia config "
+                    "action:admin-add value:@you`."
+                ),
+                ephemeral=True,
+            )
         return
 
     if action == "show":

@@ -229,8 +229,8 @@ def test_set_category_invalid_rejected():
 
 def test_non_admin_with_explicit_perms_denied():
     """A user whose perms are explicitly present but lack MANAGE_GUILD must
-    be rejected. 1.0.4: denial message mentions admin-bootstrap as the
-    recovery path."""
+    be rejected. 1.0.6: empty-allowlist denial shows the claim-admin
+    button rather than mentioning the admin-bootstrap slash sub-command."""
     ctx = MockContext()
     event = make_event("interaction_create", interaction_type=2,
                        user_id="rando",
@@ -239,8 +239,8 @@ def test_non_admin_with_explicit_perms_denied():
     # Channel must NOT have been updated
     cfg = get_config(ctx)
     assert cfg["daily_channel_id"] is None
-    # And the response should be the denial — must mention admin-bootstrap
-    # so users know how to recover.
+    # And the response should be the denial — empty allowlist → button path
     last = ctx.interaction.responses[-1]
     assert last["ephemeral"] is True
-    assert "admin-bootstrap" in last["content"]
+    assert "claim admin" in last["content"].lower()
+    assert last.get("components"), "empty-allowlist denial must include bootstrap button"

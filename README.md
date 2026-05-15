@@ -37,7 +37,9 @@ This plugin lands in the **Safe** tier. Each capability is requested for a speci
 
 `/trivia config` uses a **KV-based admin allowlist** (`cfg:server.admin_user_ids`). The Discord-based role check turned out unusable in v0.5.2 (the runtime's `get_guild` returns 404 and `list_roles` returns `permissions=0` for every role), so the allowlist is the primary gate.
 
-**First-time setup:** the server admin runs `/trivia config action:admin-bootstrap` immediately after install. While the allowlist is empty, the first user to run that command claims admin. Subsequent additions use `/trivia config action:admin-add value:@user` (admin-only). `action:admin-remove` and `action:admin-list` are also available; you can't remove the last admin.
+**First-time setup:** run any `/trivia config` sub-command (e.g. `action:show`). If no admin is configured yet, the denial message includes a "Claim Trivium admin (one-time)" button — click it to claim admin. After that, admin slash-command actions work normally for the seeded admin. Subsequent additions use `/trivia config action:admin-add value:@user`; `action:admin-remove` and `action:admin-list` are also available, and you can't remove the last admin.
+
+> **Note on the click-to-claim button:** the platform currently doesn't push manifest slash-command updates to Discord reliably, which makes the `admin-bootstrap` sub-command unreachable in some installs. The button bypasses that by living inline on the message rather than as a pre-registered slash choice. When the platform fixes propagation, the slash path becomes available too.
 
 ## Known limitations (v1)
 
