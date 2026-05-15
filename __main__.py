@@ -1166,7 +1166,11 @@ def on_button_click(ctx: Context, event: dict) -> None:
 
 @plugin.on_slash_command("trivia")
 def trivia_root(ctx: Context, event: dict) -> None:
-    opts = event.get("options") or []
+    # v0.5.2 runtime delivers slash-command sub-command + arg list under
+    # `command_options`. The SDK reference docs list it as `options`; the
+    # actual runtime disagrees. Try the runtime key first, fall back to the
+    # documented key in case a future SDK version aligns.
+    opts = event.get("command_options") or event.get("options") or []
     if not isinstance(opts, list) or not opts or not isinstance(opts[0], dict):
         ctx.interaction.respond(
             content="Use `/trivia play`, `/trivia leaderboard`, `/trivia stats`, `/trivia daily`, or `/trivia config`.",

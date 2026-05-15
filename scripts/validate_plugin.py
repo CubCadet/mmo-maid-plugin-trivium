@@ -435,7 +435,11 @@ def check_source(plugin_dir: Path, manifest: dict, f: Findings) -> None:
 
 
 # ── Layout / size checks ────────────────────────────────────────────────────
-DISALLOWED_TOPLEVEL = {"__pycache__", ".git", ".venv", "venv", ".pytest_cache", ".mypy_cache", ".DS_Store"}
+# NOTE: skill's default also lists ".git", but every real plugin repo has a
+# .git directory — the build_release.py allowlist keeps it out of the upload
+# zip regardless. Flagging .git makes CI fail on its own checkout, so we drop
+# it here.
+DISALLOWED_TOPLEVEL = {"__pycache__", ".venv", "venv", ".pytest_cache", ".mypy_cache", ".DS_Store"}
 
 # Mirror scripts/build_release.py — the runtime allowlist. These are the files
 # that actually go into the upload zip. Anything else in the repo (tests, CI,

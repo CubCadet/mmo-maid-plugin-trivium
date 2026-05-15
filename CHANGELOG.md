@@ -20,6 +20,19 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-05-15
+
+### Fixed
+- **Every slash sub-command fell through to the help message.** The v0.5.2
+  runtime delivers slash-command sub-command + args under
+  `event["command_options"]`, not `event["options"]` as the SDK reference
+  documents. `trivia_root` now reads the runtime key first and falls back
+  to the documented key for forward compatibility. Caught only after
+  first-install testing (no logs from a real runtime existed before then).
+- Added `tests/test_dispatch.py` with 9 regression cases using real-shape
+  interaction payloads taken from production logs, so the next SDK
+  contract surprise gets caught locally rather than in production.
+
 ## [1.0.0] - 2026-05-15
 
 ### Added
