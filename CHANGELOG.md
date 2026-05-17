@@ -20,6 +20,42 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [1.0.7] - 2026-05-17
+
+### Changed
+- **SDK pin bumped to `>=0.5.3,<0.6.0`.** v0.5.3 dropped 2026-05-17 (four
+  days after the v0.5.2 we shipped on). Existing code paths require no
+  rewrites; the upgrade is opt-in feature-by-feature.
+
+### Added
+- **Round buttons now disable after the answer is revealed.** v0.5.3's
+  `ctx.discord.edit_message` accepts a `components` kwarg that v0.5.2
+  rejected. `finalize_round` now swaps the live answer row for a disabled
+  row that greys out all four buttons and marks the correct one with a
+  green ✓ — closing the v1 "Buttons remain visually clickable" known
+  limitation. Disabled-row custom_ids carry a `:done` suffix so the
+  existing `parse_custom_id` regex rejects any click that might still
+  slip through, and the user gets the same "this round has expired"
+  feedback. A `TypeError` from a downgraded runtime falls back to
+  embed-only edit and logs a warning.
+
+### Diagnostic
+- **SDK 0.5.3 does NOT resolve any of the five known platform/SDK
+  roadblocks** documented through v1.0.6: `get_guild` 404, `list_roles`
+  returning `permissions=None`/`0`, `kv.list` returning empty, slash-command
+  propagation to Discord, and `@plugin.schedule` not firing in pool-mode
+  workers. All v1.0.6 workarounds (KV admin allowlist, score index,
+  bootstrap-via-button, daily-backstop-on-message) remain necessary.
+
+### Tests
+- New regression in `tests/test_game.py` asserts that after a correct
+  click, `edit_message` receives `components=[ActionRow(four disabled
+  Buttons)]` with the correct button styled `success` and labeled with
+  a ✓ marker.
+- `tests/conftest.py` patches `_MockDiscord.edit_message` to accept and
+  record the `components` kwarg — the SDK 0.5.3 testing harness still
+  lags the real Context signature by that one kwarg.
+
 ## [1.0.6] - 2026-05-15
 
 ### Fixed

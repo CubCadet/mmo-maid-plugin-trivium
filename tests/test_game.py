@@ -296,3 +296,41 @@ def test_daily_correct_appends_winner_history():
     assert rec["answered_count"] == 1
     # Daily bonus applied (hard=30 + daily=50 = 80)
     assert get_score(ctx, "daily_winner")["score"] == 80
+
+
+# ── finalize_round disables buttons (SDK 0.5.3) ────────────────────────────
+
+def test_finalize_passes_disabled_components_to_edit_message():
+    """After a round finalizes, edit_message must receive a `components` arg
+    containing a single ActionRow of four disabled Buttons, with the correct
+    answer marked ✓. v0.5.3 of the SDK accepts the components kwarg; v1.0.7
+    started using it to close the 'buttons stay clickable' known limitation."""
+    ctx = MockContext()
+    _seed_inflight(ctx, mode="single", started_by_uid="starter", correct_idx=2)
+    event = _click_event("abc123", 2, user_id="starter")
+    on_button_click(ctx, event)
+
+    assert ctx.messages_edited, "finalize_round must call edit_message"
+    edit = ctx.messages_edited[-1]
+    assert "components" in edit and edit["components"], \
+        "edit_message must receive a non-empty components kwarg"
+
+    rows = edit["components"]
+    assert len(rows) == 1, "exactly one ActionRow"
+    buttons = rows[0].children
+    assert len(buttons) == 4, "four answer buttons"
+    for i, btn in enumerate(buttons):
+        assert btn.disabled is True, f"button {i} must be disabled"
+        # Custom IDs must be ':done'-suffixed so parse_custom_id rejects them
+        assert btn.custom_id.endswith(":done"), \
+            f"button {i} custom_id must end with ':done'"
+        # Live parse_custom_id should refuse the disabled-row custom_ids
+        assert parse_custom_id(btn.custom_id) is None
+
+    # The correct button (index 2) is success/green with a ✓ marker
+    assert buttons[2].style == "success"
+    assert "✓" in buttons[2].label
+    # Wrong buttons are secondary/grey with no marker
+    for i in (0, 1, 3):
+        assert buttons[i].style == "secondary"
+        assert "✓" not in buttons[i].label

@@ -57,7 +57,7 @@ from mmo_maid_sdk import (
 # Module-level version constant. Kept in sync with manifest.json by a regression
 # test in tests/test_meta.py. Used in the on_ready log because ctx.version is
 # empty under v0.5.2 pool-mode workers.
-__version__ = "1.0.6"
+__version__ = "1.0.7"
 
 plugin = Plugin()
 
@@ -862,6 +862,21 @@ def build_answer_row(game_id: str) -> ActionRow:
     ])
 
 
+def build_disabled_row(game_id: str, correct_idx: int) -> ActionRow:
+    # custom_ids are suffixed with ":done" so parse_custom_id rejects any
+    # click that slips through the disabled state — landing on the
+    # "round has expired" branch instead of trying to score.
+    return ActionRow(*[
+        Button(
+            label=f"{ANSWER_LABELS[i]} ✓" if i == correct_idx else ANSWER_LABELS[i],
+            custom_id=f"{format_custom_id(game_id, i)}:done",
+            style="success" if i == correct_idx else "secondary",
+            disabled=True,
+        )
+        for i in range(4)
+    ])
+
+
 def build_finalized_embed(inflight: dict, *, winner_uid: str | None,
                           outcome: str) -> dict:
     """outcome ∈ {"correct", "wrong", "timeout"}."""
@@ -913,14 +928,19 @@ def finalize_round(ctx: Context, *, game_id: str, inflight: dict,
                    request_id: str = "") -> None:
     """Reveal the answer by editing the round message.
 
-    SDK note: ctx.discord.edit_message in v0.5.2 accepts only content and
-    embeds — no `components` arg, so the original action row stays clickable
-    after the round ends. The "round has ended" guard in the click handler
-    (inflight-not-found check) catches any late clicks gracefully.
+    SDK note: ctx.discord.edit_message gained a `components` kwarg in v0.5.3,
+    so we now replace the live answer row with a disabled row marking the
+    correct answer. If a stale runtime rejects the kwarg, fall back to
+    embed-only — the late-click "round has ended" path still catches strays.
     """
     embed = build_finalized_embed(inflight, winner_uid=winner_uid, outcome=outcome)
     channel_id = str(inflight.get("channel_id") or "")
     message_id = str(inflight.get("message_id") or "")
+    answers = inflight.get("shuffled_answers") or []
+    correct_idx = int(inflight.get("correct_idx") or 0)
+    if not (0 <= correct_idx < len(answers)):
+        correct_idx = 0
+    disabled_row = build_disabled_row(game_id, correct_idx)
 
     if channel_id and message_id:
         try:
@@ -928,7 +948,24 @@ def finalize_round(ctx: Context, *, game_id: str, inflight: dict,
                 channel_id=channel_id,
                 message_id=message_id,
                 embeds=[embed],
+                components=[disabled_row],
             )
+        except TypeError:
+            # Runtime older than 0.5.3 (downgrade scenario) — retry without
+            # the new kwarg so the answer at least gets revealed.
+            ctx.log("edit_message rejected components kwarg; falling back to embed-only",
+                    level="warning", tags=["trivium", "discord"],
+                    request_id=request_id, game_id=game_id)
+            try:
+                ctx.discord.edit_message(
+                    channel_id=channel_id,
+                    message_id=message_id,
+                    embeds=[embed],
+                )
+            except SdkError as exc:
+                ctx.log(f"finalize edit failed (fallback): {exc}",
+                        level="error", tags=["trivium", "discord"],
+                        request_id=request_id, game_id=game_id)
         except SdkError as exc:
             ctx.log(f"finalize edit failed: {exc}",
                     level="error", tags=["trivium", "discord"],

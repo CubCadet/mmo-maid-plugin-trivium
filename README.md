@@ -45,9 +45,8 @@ This plugin lands in the **Safe** tier. Each capability is requested for a speci
 
 These are deliberate trade-offs documented up-front so server admins know what to expect:
 
-1. **The embed doesn't auto-reveal the answer on timeout.** If no one clicks an answer button before the round's inflight TTL expires (default 20s for `/trivia play`, 1h for daily), the public embed stays as the original question. We don't have a reliable background-task mechanism that works across pool-mode workers, so we trade silent timeout for guaranteed multi-tenant reliability. Daily rounds with their 1-hour window almost always have a winner. (Note: when someone *does* click, the embed updates to reveal the answer — that path works fine.)
-2. **The buttons remain visually clickable after the round ends.** The SDK's `edit_message` in v0.5.2 doesn't accept a `components` arg, so the four answer buttons stay on screen after the embed is revealed. Late clicks are caught by the "inflight not found" guard and respond with "this round has ended."
-3. **Some categories have no fallback.** Open Trivia DB has 24 categories; The Trivia API covers ~10 of those cleanly. Categories like Video Games, Mythology, Anime & Manga don't have a Trivia API mapping — if OTDB is unavailable for them, `/trivia play` returns "Trivia sources are unavailable, try again in a few minutes."
+1. **The embed doesn't auto-reveal the answer on timeout.** If no one clicks an answer button before the round's inflight TTL expires (default 20s for `/trivia play`, 1h for daily), the public embed stays as the original question. We don't have a reliable background-task mechanism that works across pool-mode workers, so we trade silent timeout for guaranteed multi-tenant reliability. Daily rounds with their 1-hour window almost always have a winner. (Note: when someone *does* click, the embed updates to reveal the answer and the buttons grey out — that path works fine.)
+2. **Some categories have no fallback.** Open Trivia DB has 24 categories; The Trivia API covers ~10 of those cleanly. Categories like Video Games, Mythology, Anime & Manga don't have a Trivia API mapping — if OTDB is unavailable for them, `/trivia play` returns "Trivia sources are unavailable, try again in a few minutes."
 
 ## Quick start (development)
 
