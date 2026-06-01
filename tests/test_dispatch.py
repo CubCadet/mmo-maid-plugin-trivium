@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import json
 
-from mmo_maid_sdk.testing import MockContext, make_event
+from mmo_maid_sdk.testing import MockClock, MockContext, make_event
 
 from plugin_main import (
+    COOLDOWN_SECONDS,
     KV_CONFIG,
     DEFAULT_CONFIG,
     PERM_MANAGE_GUILD,
@@ -167,6 +168,77 @@ def test_dispatch_no_options_shows_help_fallback():
     trivia_root(ctx, event)
     last = ctx.interaction.responses[-1]
     assert "Use `/trivia play`" in last["content"]
+
+
+# ── Cooldown gate (MockClock-driven, SDK 0.5.4+) ──────────────────────────
+
+def _play_event(user_id="u1"):
+    return _runtime_event(
+        user_id=user_id,
+        command_options=[{"name": "play", "type": 1, "options": [
+            {"name": "category", "type": 3, "value": "Music"},
+            {"name": "difficulty", "type": 3, "value": "easy"},
+        ]}],
+    )
+
+
+def _stub_otdb(ctx):
+    """Wire MockContext.http so cmd_play has a working OTDB to fetch from."""
+    ctx.http.mock_response("api_token.php", status=200,
+                           body='{"response_code": 0, "token": "T"}')
+    ctx.http.mock_response("api.php", status=200, body=json.dumps({
+        "response_code": 0,
+        "results": [{
+            "category": "Music", "type": "multiple", "difficulty": "easy",
+            "question": "Q?", "correct_answer": "C",
+            "incorrect_answers": ["w1", "w2", "w3"],
+        }],
+    }))
+
+
+def test_cooldown_gate_blocks_second_play_within_window():
+    """Two /trivia plays inside COOLDOWN_SECONDS: the second is rejected
+    ephemerally with a 'Slow down' message before the defer fires.
+
+    Locks in the comment at __main__.py:1213 — the cooldown check must
+    happen BEFORE ctx.interaction.defer(), so a tripped cooldown shows
+    instantly rather than after a 3-second 'thinking…' indicator."""
+    clock = MockClock(start=1000.0)
+    ctx = MockContext(clock=clock)
+    _stub_otdb(ctx)
+
+    # First call: succeeds. Defer + public round embed + ephemeral followup.
+    trivia_root(ctx, _play_event())
+    assert ctx.interaction.defers, "first /trivia play must defer"
+    assert ctx.messages_sent, "first /trivia play must post the round embed"
+    first_defer_count = len(ctx.interaction.defers)
+
+    # Second call within the cooldown window: blocked.
+    trivia_root(ctx, _play_event())
+    last = ctx.interaction.responses[-1]
+    assert last["ephemeral"] is True
+    assert "Slow down" in last["content"]
+    # And critically: NO additional defer fired (rejection happened first).
+    assert len(ctx.interaction.defers) == first_defer_count
+
+
+def test_cooldown_gate_releases_after_window_elapses():
+    """Once COOLDOWN_SECONDS have passed, /trivia play succeeds again."""
+    clock = MockClock(start=1000.0)
+    ctx = MockContext(clock=clock)
+    _stub_otdb(ctx)
+
+    trivia_root(ctx, _play_event())
+    defers_after_first = len(ctx.interaction.defers)
+
+    clock.advance(COOLDOWN_SECONDS + 1)
+    trivia_root(ctx, _play_event())
+
+    # Second call deferred too — cooldown was no longer active.
+    assert len(ctx.interaction.defers) == defers_after_first + 1
+    # And no "Slow down" message was emitted on this round.
+    assert not any("Slow down" in (r.get("content") or "")
+                   for r in ctx.interaction.responses)
 
 
 # ── Backward-compat: pre-fix code path still works if SDK ever realigns ────

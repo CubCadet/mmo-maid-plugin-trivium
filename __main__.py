@@ -57,7 +57,7 @@ from mmo_maid_sdk import (
 # Module-level version constant. Kept in sync with manifest.json by a regression
 # test in tests/test_meta.py. Used in the on_ready log because ctx.version is
 # empty under v0.5.2 pool-mode workers.
-__version__ = "1.0.7"
+__version__ = "1.0.8"
 
 plugin = Plugin()
 

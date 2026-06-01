@@ -1,7 +1,7 @@
 {
   "id": "trivium",
   "name": "Trivium",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "description": "Multiple-choice trivia rounds played via Discord buttons, with per-server leaderboards, per-user streaks, and admin-scheduled daily trivia. Questions are sourced from Open Trivia DB with The Trivia API as fallback.",
   "author": "CubCadet",
   "tags": ["trivia", "games", "fun", "engagement", "daily"],

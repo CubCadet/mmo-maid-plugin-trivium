@@ -2,14 +2,18 @@
 negative cache."""
 from __future__ import annotations
 
-from mmo_maid_sdk.testing import MockContext
+import json
+
+from mmo_maid_sdk.testing import MockClock, MockContext
 
 from plugin_main import (
     CACHE_SCHEMA_V,
     NEGATIVE_TTL,
+    RATE_LIMITED,
     SEEN_RING_CAP,
     TOKEN_EXHAUSTED,
     clear_batch,
+    fetch_one_question,
     get_seen,
     kv_qbatch,
     kv_qbatch_neg,
@@ -165,3 +169,62 @@ def test_negative_keys_include_all_three_dimensions():
     c = kv_qbatch_neg("otdb", "B", "easy")
     d = kv_qbatch_neg("trivia_api", "A", "easy")
     assert len({a, b, c, d}) == 4
+
+
+# ── Negative cache TTL expiry (MockClock-driven, SDK 0.5.4+) ───────────────
+
+def _otdb_one_question(question="Capital of France?", correct="Paris"):
+    return json.dumps({
+        "response_code": 0,
+        "results": [{
+            "category": "General Knowledge",
+            "type": "multiple", "difficulty": "easy",
+            "question": question, "correct_answer": correct,
+            "incorrect_answers": ["London", "Berlin", "Rome"],
+        }],
+    })
+
+
+def _trivia_api_one(correct="Tokyo"):
+    return json.dumps([{
+        "category": "general_knowledge",
+        "id": "abc1",
+        "correctAnswer": correct,
+        "incorrectAnswers": ["Osaka", "Kyoto", "Nagoya"],
+        "question": {"text": "Capital of Japan?", "image": None},
+        "difficulty": "easy",
+        "type": "Multiple Choice",
+    }])
+
+
+def test_negative_cache_expiry_reopens_source():
+    """The NEGATIVE_TTL table must actually drive KV expiry — once the window
+    elapses, the source is retried instead of permanently skipped.
+
+    Guards against a regression where someone changes write_negative's
+    ttl_seconds kwarg (or drops it) and silently locks OTDB off forever
+    after a single 429."""
+    clock = MockClock(start=1000.0)
+    ctx = MockContext(clock=clock)
+    ctx.http.mock_response("api_token.php", status=200,
+                           body='{"response_code": 0, "token": "T"}')
+    ctx.http.mock_response("api.php", status=200, body=_otdb_one_question())
+    ctx.http.mock_response("the-trivia-api.com", status=200, body=_trivia_api_one())
+
+    # Seed: OTDB is negatively cached as rate-limited.
+    write_negative(ctx, "otdb", "General Knowledge", "any", RATE_LIMITED)
+    assert read_negative(ctx, "otdb", "General Knowledge", "any") == RATE_LIMITED
+
+    # First fetch: OTDB skipped (neg cache live), fall through to Trivia API.
+    picked = fetch_one_question(ctx, "General Knowledge", "any")
+    assert picked is not None
+    assert picked["source"] == "trivia_api"
+
+    # Advance past the RATE_LIMITED TTL — the neg cache must drop.
+    clock.advance(NEGATIVE_TTL[RATE_LIMITED] + 1)
+    assert read_negative(ctx, "otdb", "General Knowledge", "any") is None
+
+    # Second fetch: OTDB is retried (no longer suppressed) and now wins.
+    picked = fetch_one_question(ctx, "General Knowledge", "any")
+    assert picked is not None
+    assert picked["source"] == "otdb"

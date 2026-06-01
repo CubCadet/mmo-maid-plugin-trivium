@@ -20,6 +20,52 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [1.0.8] - 2026-05-31
+
+### Changed
+- **SDK pin floor bumped to `>=0.5.4,<0.6.0`** in both `requirements.txt`
+  and `requirements-dev.txt`. SDK 0.5.4 is a test-harness-only release —
+  production runtime files (`_context.py`, `_plugin.py`, `_components.py`,
+  `_exceptions.py`, `_transport.py`, `cli.py`) are byte-identical to 0.5.3.
+  Bumping the floor locks in the native mock fixes so fresh clones can't
+  resolve a stale 0.5.2/0.5.3 and break on `allowed_mentions` /
+  `components` kwargs.
+
+### Removed
+- Deleted the three `tests/conftest.py` harness shims
+  (`_patched_respond`, `_patched_followup`, `_patched_edit_message`).
+  SDK 0.5.4's native MockContext accepts `allowed_mentions=` on
+  respond/followup and `components=` on edit_message, recording
+  byte-equivalent dicts to what the shims produced. Conftest is now ~20
+  lines (the canonical scaffold shape: side-load `__main__.py` only).
+
+### Added
+- `tests/test_dispatch.py::test_cooldown_gate_blocks_second_play_within_window`
+  and `::test_cooldown_gate_releases_after_window_elapses` — use the new
+  SDK 0.5.4 `MockClock` to lock in the 3-second per-user cooldown on
+  `/trivia play`, including the user-visible "Slow down — try again in
+  Ns" copy and the check-before-defer ordering invariant
+  ([__main__.py:1213](__main__.py)).
+- `tests/test_cache.py::test_negative_cache_expiry_reopens_source` —
+  verifies `NEGATIVE_TTL` actually drives KV expiry. After a
+  `RATE_LIMITED` 600s window elapses, OTDB is re-attempted as a fetch
+  source rather than permanently skipped. Catches a regression where
+  someone drops the `ttl_seconds=` kwarg from `write_negative` and
+  silently locks OTDB off after a single 429.
+
+### Notes
+- **Zero production codepath changes.** The upload zip is byte-identical
+  to v1.0.7 except for `manifest.json` (version bump) and
+  `requirements.txt` (SDK pin floor). All v1.0.6/1.0.7 workarounds
+  (KV admin allowlist, score index, bootstrap button, daily backstop)
+  remain in place.
+- The three test-harness gaps Trivium previously worked around in
+  `tests/conftest.py` (`allowed_mentions` on respond/followup,
+  `components` on edit_message) are resolved natively in mmo-maid-sdk
+  0.5.4. The five platform-side blockers (`get_guild` 404, `list_roles`
+  permissions=None, `kv.list` empty, slash-command propagation,
+  pool-mode `@plugin.schedule`) remain open and are unaffected by 0.5.4.
+
 ## [1.0.7] - 2026-05-17
 
 ### Changed
