@@ -57,7 +57,7 @@ from mmo_maid_sdk import (
 # Module-level version constant. Kept in sync with manifest.json by a regression
 # test in tests/test_meta.py. Used in the on_ready log because ctx.version is
 # empty under v0.5.2 pool-mode workers.
-__version__ = "1.0.8"
+__version__ = "1.0.9"
 
 plugin = Plugin()
 
@@ -1405,7 +1405,12 @@ def on_button_click(ctx: Context, event: dict) -> None:
     clicker_uid = str(event.get("user_id") or "")
     started_by_uid = str(inflight.get("started_by_uid") or "")
     mode = inflight.get("mode") if inflight.get("mode") in VALID_MODES else "single"
-    correct_idx = int(inflight.get("correct_idx") or -1)
+    # NB: do NOT collapse to `int(inflight.get("correct_idx") or -1)` — Python
+    # treats the legitimate value 0 as falsy and would silently rewrite it to
+    # the -1 sentinel, marking ~25% of correctly-clicked rounds as wrong
+    # (the ones where the shuffle landed the correct answer in slot A).
+    _ci = inflight.get("correct_idx")
+    correct_idx = int(_ci) if isinstance(_ci, int) else -1
     is_correct = (choice_idx == correct_idx)
     difficulty = inflight.get("difficulty") or "medium"
     is_daily = bool(inflight.get("is_daily"))

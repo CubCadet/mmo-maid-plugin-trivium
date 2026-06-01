@@ -228,6 +228,53 @@ def test_single_mode_correct_answer_awards_points_and_finalizes():
     assert ctx.messages_edited or any("✅" in r["content"] for r in ctx.interaction.responses)
 
 
+# ── Regression: correct_idx=0 (shuffle put correct answer in slot A) ───────
+#
+# Prior to v1.0.9 the click handler read `int(inflight.get("correct_idx")
+# or -1)`. Python evaluates `0 or -1` to -1 because 0 is falsy, so a stored
+# correct_idx of 0 was silently rewritten to -1 — marking ~25% of correctly
+# clicked rounds (the ones the shuffle put in slot A) as wrong. The two
+# tests below would fail against the v1.0.0–v1.0.8 click handler and pass
+# against v1.0.9+.
+
+def test_single_mode_click_A_when_correct_is_A_scores_correct():
+    """Bug from v1.0.0–v1.0.8: click A while correct_idx=0 was marked wrong."""
+    ctx = MockContext()
+    _seed_inflight(ctx, mode="single", started_by_uid="starter", correct_idx=0)
+    event = _click_event("abc123", 0, user_id="starter")
+    on_button_click(ctx, event)
+    rec = get_score(ctx, "starter")
+    assert rec["score"] == 20, "clicking the correct A-slot must award points"
+    assert rec["correct"] == 1
+    assert rec["streak_current"] == 1
+    assert ctx.kv.get(kv_inflight("abc123")) is None
+
+
+def test_single_mode_click_B_when_correct_is_A_is_wrong():
+    """The sibling of the bug-regression test above: clicking the wrong slot
+    must still be marked wrong when correct_idx=0 (i.e. the sentinel-coerce
+    bug didn't accidentally invert the comparison for non-A clicks)."""
+    ctx = MockContext()
+    _seed_inflight(ctx, mode="single", started_by_uid="starter", correct_idx=0)
+    event = _click_event("abc123", 1, user_id="starter")  # clicked B
+    on_button_click(ctx, event)
+    rec = get_score(ctx, "starter")
+    assert rec["score"] == 0
+    assert rec["correct"] == 0
+    assert rec["total"] == 1
+
+
+def test_open_mode_first_correct_A_click_wins():
+    """Open-mode counterpart — clicking the correct slot A wins, just like
+    any other slot would. v1.0.0–v1.0.8 missed this path too."""
+    ctx = MockContext()
+    _seed_inflight(ctx, mode="open", correct_idx=0)
+    event = _click_event("abc123", 0, user_id="player1")
+    on_button_click(ctx, event)
+    assert "Correct" in ctx.interaction.responses[0]["content"]
+    assert get_score(ctx, "player1")["score"] == 20
+
+
 def test_single_mode_wrong_answer_breaks_streak_and_finalizes():
     ctx = MockContext()
     _seed_inflight(ctx, mode="single", started_by_uid="starter", correct_idx=2)

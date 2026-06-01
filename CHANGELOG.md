@@ -20,6 +20,43 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [1.0.9] - 2026-05-31
+
+### Fixed
+- **Clicking the correct answer in slot A was marked wrong.** The click
+  handler at `on_button_click` read
+  `int(inflight.get("correct_idx") or -1)`. Python evaluates `0 or -1` to
+  `-1` (because `0` is falsy), so any stored `correct_idx = 0` was
+  silently rewritten to the `-1` sentinel and the comparison
+  `choice_idx == correct_idx` failed for the (~25% of) rounds whose
+  shuffle landed the correct answer in slot A. Display paths
+  (`build_finalized_embed`, `build_disabled_row`) used `or 0` and
+  happened to render the right answer regardless, which is why the
+  embed footer and disabled row marked A as correct even as the
+  scoring path told the user "wrong" and broke their streak. Fix
+  replaces the truthy-`or` with a type-narrowed default so a stored
+  `0` survives. Bug has been live since v1.0.0; first reproduced in
+  production on a Video Games round where "Table Tennis" landed in A.
+
+### Added
+- Three regression tests in `tests/test_game.py` exercising
+  `correct_idx = 0`:
+  - `test_single_mode_click_A_when_correct_is_A_scores_correct` —
+    clicking the correct A-slot must award points.
+  - `test_single_mode_click_B_when_correct_is_A_is_wrong` — the
+    sibling check that a wrong click is still wrong (i.e. the
+    sentinel coerce didn't accidentally invert the comparison).
+  - `test_open_mode_first_correct_A_click_wins` — open-mode
+    counterpart so the regression is covered on both code paths.
+
+  These tests fail against v1.0.0–v1.0.8 and pass against v1.0.9.
+
+### Notes
+- Zero behavior change outside the click-correctness path. All other
+  v1.0.6/1.0.7/1.0.8 workarounds (admin allowlist, score index,
+  bootstrap button, daily backstop, disabled-row finalize, MockClock
+  tests) remain untouched.
+
 ## [1.0.8] - 2026-05-31
 
 ### Changed
