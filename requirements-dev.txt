@@ -3,4 +3,4 @@
 
 pytest>=7.0
 pyyaml>=6.0           # robust events.yaml parsing for `mmo dev`
-mmo-maid-sdk>=0.5.4,<0.6.0   # MockContext, make_event, MockClock, the `mmo` CLI
+mmo-maid-sdk>=0.6.0,<0.7.0   # MockContext, make_event, MockClock, the `mmo` CLI
