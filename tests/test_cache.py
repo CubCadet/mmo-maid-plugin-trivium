@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from mmo_maid_sdk.testing import MockClock, MockContext
+from yourbot_sdk.testing import MockClock, MockContext
 
 from plugin_main import (
     CACHE_SCHEMA_V,

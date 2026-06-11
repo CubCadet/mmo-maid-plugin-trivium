@@ -15,7 +15,7 @@ import time
 from typing import Any
 
 import pytest
-from mmo_maid_sdk.testing import MockContext, make_event
+from yourbot_sdk.testing import MockContext, make_event
 
 from plugin_main import (
     ADMIN_CACHE_TTL,
@@ -246,7 +246,7 @@ def test_get_guild_failure_is_non_fatal_role_check_still_works():
     """v1.0.3: get_guild failure no longer denies outright. The role-permissions
     union from list_roles + get_member is the load-bearing check. As long as
     list_roles works and the user has a qualifying role, they're allowed."""
-    from mmo_maid_sdk import SdkError
+    from yourbot_sdk import SdkError
     scripted = _ScriptedDiscord(
         guild_error=SdkError("get_guild 404 from runner"),
         roles=[{"id": "role_admin", "permissions": str(PERM_MANAGE_GUILD)}],
@@ -263,7 +263,7 @@ def test_get_guild_failure_is_non_fatal_role_check_still_works():
 def test_get_guild_failure_with_no_qualifying_role_denies_not_crashes():
     """Belt-and-suspenders: get_guild fails, user has no qualifying role,
     we deny politely with "no_perms_roles" — NOT crash."""
-    from mmo_maid_sdk import SdkError
+    from yourbot_sdk import SdkError
     scripted = _ScriptedDiscord(
         guild_error=SdkError("upstream down"),
         roles=[],
@@ -308,7 +308,7 @@ def test_runtime_error_from_get_member_does_not_crash():
 def test_list_roles_failure_denies_closed():
     """list_roles is the load-bearing call — without it we have nothing to
     union, so the cache refresh returns None and we deny."""
-    from mmo_maid_sdk import SdkError
+    from yourbot_sdk import SdkError
     scripted = _ScriptedDiscord(
         guild={"owner_id": "owner"},
         roles_error=SdkError("upstream down"),
@@ -320,7 +320,7 @@ def test_list_roles_failure_denies_closed():
 
 
 def test_sdk_error_on_get_member_denies_closed():
-    from mmo_maid_sdk import SdkError
+    from yourbot_sdk import SdkError
     scripted = _ScriptedDiscord(
         guild={"owner_id": "owner"},
         roles=[{"id": "role_admin", "permissions": str(PERM_MANAGE_GUILD)}],
@@ -338,7 +338,7 @@ def test_missing_member_no_longer_allows_by_default():
     """The 1.0.1 vulnerability: no member.permissions in the payload → True.
     In 1.0.2 the fallback path requires Discord lookups, which deny when
     they fail. This pins the new contract in place forever."""
-    from mmo_maid_sdk import SdkError
+    from yourbot_sdk import SdkError
     scripted = _ScriptedDiscord(guild_error=SdkError("simulating 1.0.1 environment"))
     ctx = _ctx_with_discord(scripted)
     event = _event(user_id="any_user")

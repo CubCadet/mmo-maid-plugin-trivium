@@ -1,4 +1,4 @@
-"""Trivium — multiple-choice trivia for MMO Maid (v1.0.0).
+"""Trivium — multiple-choice trivia for YourBot.
 
 Multiple-choice trivia rounds played through Discord buttons. Questions are
 sourced from Open Trivia DB (primary) with The Trivia API as fallback.
@@ -18,9 +18,9 @@ Architectural notes worth knowing if you're maintaining this file:
     legitimate "&"-containing strings.
 
   * Custom_ids are dynamic ("triv:1:{game_id}:{choice_idx}"), so the answer
-    buttons are dispatched via @plugin.on_event("interaction_create") with
-    manual filtering — NOT via @plugin.on_component (which is an exact-
-    string match).
+    buttons are dispatched via @plugin.on_component(prefix=CUSTOM_ID_PREFIX).
+    The handler keeps its own interaction-type/prefix guards so it stays
+    safe to call directly (tests do).
 
   * @plugin.schedule(60) drives the daily-trivia post, but the SDK docs warn
     schedules may not fire in pool mode. /trivia play carries an opportunistic
@@ -42,7 +42,7 @@ import secrets
 import time
 from datetime import datetime, timezone
 
-from mmo_maid_sdk import (
+from yourbot_sdk import (
     ActionRow,
     Button,
     CapabilityError,
@@ -57,7 +57,7 @@ from mmo_maid_sdk import (
 # Module-level version constant. Kept in sync with manifest.json by a regression
 # test in tests/test_meta.py. Used in the on_ready log because ctx.version is
 # empty under v0.5.2 pool-mode workers.
-__version__ = "1.0.9"
+__version__ = "1.0.10"
 
 plugin = Plugin()
 
@@ -1372,12 +1372,14 @@ def on_bootstrap_button(ctx: Context, event: dict) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Component dispatch — button clicks via @plugin.on_event("interaction_create")
-# (NOT @plugin.on_component because custom_ids are dynamic)
+# Component dispatch — answer buttons via @plugin.on_component(prefix=...)
+# (custom_ids are dynamic; prefix routing handles them since SDK 0.5.x)
 # ──────────────────────────────────────────────────────────────────────────
 
-@plugin.on_event("interaction_create")
+@plugin.on_component(prefix=CUSTOM_ID_PREFIX)
 def on_button_click(ctx: Context, event: dict) -> None:
+    # The decorator already filters on interaction_type and prefix, but the
+    # guards stay: tests (and any future caller) invoke this directly.
     if event.get("interaction_type") != 3:
         return
     custom_id = event.get("custom_id") or ""

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone, timedelta
 
-from mmo_maid_sdk.testing import MockContext, make_event
+from yourbot_sdk.testing import MockContext, make_event
 
 from plugin_main import (
     DEFAULT_CONFIG,

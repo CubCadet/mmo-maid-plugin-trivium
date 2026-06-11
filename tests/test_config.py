@@ -3,7 +3,7 @@ sub-action routing, value validation. The full admin-gate matrix lives in
 tests/test_admin_gate.py."""
 from __future__ import annotations
 
-from mmo_maid_sdk.testing import MockContext, make_event
+from yourbot_sdk.testing import MockContext, make_event
 
 from plugin_main import (
     DEFAULT_CONFIG,

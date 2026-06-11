@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from mmo_maid_sdk.testing import MockContext
+from yourbot_sdk.testing import MockContext
 
 from plugin_main import (
     FETCH_ERROR,

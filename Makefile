@@ -2,14 +2,14 @@
 
 help:
 	@echo "Targets:"
-	@echo "  make dev       - local hot-reload loop (mmo dev --watch)"
+	@echo "  make dev       - local hot-reload loop (yourbot dev --watch)"
 	@echo "  make test      - run pytest"
 	@echo "  make validate  - pre-flight validator (manifest, caps, SQL safety, layout)"
 	@echo "  make release   - validate + test, then build dist/<plugin_id>-<version>.zip"
 	@echo "  make clean     - remove caches and build artifacts"
 
 dev:
-	mmo dev --watch
+	yourbot dev --watch
 
 test:
 	python -m pytest -q

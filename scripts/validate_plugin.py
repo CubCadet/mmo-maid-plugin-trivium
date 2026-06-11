@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-validate_plugin.py — pre-flight validator for MMO Maid plugins (SDK v0.5.1).
+validate_plugin.py — pre-flight validator for YourBot plugins (SDK v0.6.x).
 
 Usage:
     python validate_plugin.py [plugin_dir]
@@ -15,11 +15,11 @@ Checks (all reported, exit code 0 only if everything passes):
        - has required fields: id, name, version, description
        - 'id' matches /^[a-z][a-z0-9_]{2,31}$/
        - uses 'capabilities_required' (NOT the legacy 'capabilities_requested')
-       - all capabilities are from the canonical v0.5.1 set
+       - all capabilities are from the canonical set
        - 'slash_commands' entries have 'name' + 'description'
        - 'proxy_domains_requested' entries are bare hosts (no scheme, no path)
  3. Source code (__main__.py):
-       - imports Plugin and Context from mmo_maid_sdk
+       - imports Plugin and Context from yourbot_sdk (legacy mmo_maid_sdk accepted)
        - has `plugin = Plugin()` at module level
        - calls `plugin.run()` somewhere (and warns if it's not the last
          non-blank, non-comment line)
@@ -49,7 +49,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Iterable
 
-# ── Canonical capability list (v0.5.1) ─────────────────────────────────────
+# ── Canonical capability list (unchanged v0.5.1 → v0.6.x) ──────────────────
 SAFE_CAPS = {
     "storage:kv",
     "discord:send_message",
@@ -64,6 +64,13 @@ RISKY_CAPS = {
     "discord:manage_channels",
     "discord:manage_webhooks",
     "storage:sql",
+    # Post-0.5.1 capabilities the 0.6.x platform validator recognises
+    # (ctx.secrets.* / message-content access patterns in the SDK's vendored
+    # _validation.py). Official tier docs don't cover them yet — treated as
+    # Risky here so declaring one flags a tier shift instead of a bogus typo
+    # warning.
+    "storage:secrets",
+    "events:message_content",
 }
 DANGEROUS_CAPS = {
     "discord:moderate_members",
@@ -75,9 +82,11 @@ ALL_CAPS = SAFE_CAPS | RISKY_CAPS | DANGEROUS_CAPS
 
 # Legacy capability names that the v0.5.1 CLI scaffold still emits but the
 # runtime no longer recognises — flag them as ERRORS.
+# (events:message_content moved OUT of this set: the 0.6.x platform validator
+# detects message-content access and requires the capability to be declared.)
 LEGACY_CAPS = {
     "kv:read", "kv:write",
-    "events:message_content", "events:member_join", "events:member_leave",
+    "events:member_join", "events:member_leave",
     "events:reaction_add", "events:reaction_remove",
     "discord:respond_to_interaction",
 }
@@ -85,41 +94,79 @@ LEGACY_CAPS = {
 # Map ctx.* method calls → required capability.
 # Format: dotted call path → capability string.
 CAPABILITY_REQUIREMENTS = {
-    # Discord
+    # Discord — every name verified against the installed yourbot-sdk 0.6.1:
+    # _context.py docstrings ("Requires capability: ...") and the vendored
+    # platform validator patterns in _validation.py. The map previously
+    # carried names that never existed in the SDK (fetch_*, remove_reaction,
+    # create_role/delete_role, http.put/patch/delete) — dead patterns that
+    # made real usage invisible (false "declared but unused" WARN on
+    # discord:read) while pretending coverage.
     "ctx.discord.send_message":      "discord:send_message",
+    "ctx.discord.pin_message":       "discord:send_message",
+    "ctx.discord.unpin_message":     "discord:send_message",
     "ctx.discord.edit_message":      "discord:edit_message",
     "ctx.discord.delete_message":    "discord:delete_message",
+    "ctx.discord.bulk_delete_messages": "discord:delete_message",
     "ctx.discord.add_reaction":      "discord:add_reaction",
-    "ctx.discord.remove_reaction":   "discord:add_reaction",
-    "ctx.discord.fetch_messages":    "discord:read",
-    "ctx.discord.fetch_member":      "discord:read",
-    "ctx.discord.fetch_channel":    "discord:read",
-    "ctx.discord.fetch_role":        "discord:read",
+    "ctx.discord.get_member":        "discord:read",
+    "ctx.discord.get_channel":       "discord:read",
+    "ctx.discord.get_guild":         "discord:read",
+    "ctx.discord.list_roles":        "discord:read",
+    "ctx.discord.list_members":      "discord:read",
+    "ctx.discord.list_channels":     "discord:read",
+    "ctx.discord.search_members":    "discord:read",
+    "ctx.discord.get_messages":      "discord:read",
+    "ctx.discord.iter_messages":     "discord:read",
     "ctx.discord.create_channel":    "discord:manage_channels",
     "ctx.discord.delete_channel":    "discord:manage_channels",
     "ctx.discord.edit_channel":      "discord:manage_channels",
+    "ctx.discord.set_channel_permissions":   "discord:manage_channels",
+    "ctx.discord.delete_channel_permission": "discord:manage_channels",
+    "ctx.discord.create_thread":     "discord:manage_channels",
+    "ctx.discord.edit_thread":       "discord:manage_channels",
     "ctx.discord.create_webhook":    "discord:manage_webhooks",
     "ctx.discord.delete_webhook":    "discord:manage_webhooks",
+    "ctx.discord.execute_webhook":   "discord:manage_webhooks",
     "ctx.discord.add_role":          "discord:manage_roles",
     "ctx.discord.remove_role":       "discord:manage_roles",
-    "ctx.discord.create_role":       "discord:manage_roles",
-    "ctx.discord.delete_role":       "discord:manage_roles",
+    "ctx.discord.add_role_bulk":     "discord:manage_roles",
+    "ctx.discord.remove_role_bulk":  "discord:manage_roles",
     "ctx.discord.timeout_member":    "discord:moderate_members",
+    "ctx.discord.timeout_bulk":      "discord:moderate_members",
+    "ctx.discord.set_nickname":      "discord:moderate_members",
     "ctx.discord.kick_member":       "discord:kick_members",
+    "ctx.discord.kick_bulk":         "discord:kick_members",
     "ctx.discord.ban_member":        "discord:ban_members",
+    "ctx.discord.unban_member":      "discord:ban_members",
+    # Interactions — interaction:respond is auto-added with slash_commands;
+    # mapping the calls makes usage detection positive instead of relying on
+    # the blanket AUTO_OR_RUNTIME suppression.
+    "ctx.interaction.respond":    "interaction:respond",
+    "ctx.interaction.defer":      "interaction:respond",
+    "ctx.interaction.followup":   "interaction:respond",
+    "ctx.interaction.send_modal": "interaction:respond",
     # Storage
     "ctx.kv.get":         "storage:kv",
+    "ctx.kv.get_many":    "storage:kv",
     "ctx.kv.set":         "storage:kv",
+    "ctx.kv.set_many":    "storage:kv",
     "ctx.kv.delete":      "storage:kv",
+    "ctx.kv.exists":      "storage:kv",
+    "ctx.kv.count":       "storage:kv",
     "ctx.kv.list":        "storage:kv",
+    "ctx.kv.list_values": "storage:kv",
     "ctx.kv.increment":   "storage:kv",
+    "ctx.kv.decrement":   "storage:kv",
     "ctx.sql.execute":    "storage:sql",
-    # HTTP
+    "ctx.sql.query":      "storage:sql",
+    "ctx.sql.query_one":  "storage:sql",
+    "ctx.sql.scalar":     "storage:sql",
+    "ctx.secrets.get":    "storage:secrets",
+    "ctx.secrets.set":    "storage:secrets",
+    "ctx.secrets.delete": "storage:secrets",
+    # HTTP — _HttpApi exposes request/get/post only (no put/patch/delete)
     "ctx.http.get":       "proxy:http",
     "ctx.http.post":      "proxy:http",
-    "ctx.http.put":       "proxy:http",
-    "ctx.http.patch":     "proxy:http",
-    "ctx.http.delete":    "proxy:http",
     "ctx.http.request":   "proxy:http",
 }
 
@@ -292,15 +339,16 @@ def check_source(plugin_dir: Path, manifest: dict, f: Findings) -> None:
         f.error(f"__main__.py has a syntax error: {exc}")
         return
 
-    # Imports
+    # Imports — yourbot_sdk is canonical; mmo_maid_sdk still resolves via the
+    # compat shim shipped in the yourbot-sdk wheel, so accept it too.
     imports_plugin = False
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "mmo_maid_sdk":
+        if isinstance(node, ast.ImportFrom) and node.module in ("yourbot_sdk", "mmo_maid_sdk"):
             for alias in node.names:
                 if alias.name == "Plugin":
                     imports_plugin = True
     if not imports_plugin:
-        f.error("__main__.py does not import Plugin from mmo_maid_sdk")
+        f.error("__main__.py does not import Plugin from yourbot_sdk")
 
     # plugin = Plugin() at module level
     has_module_plugin = False
@@ -360,8 +408,9 @@ def check_source(plugin_dir: Path, manifest: dict, f: Findings) -> None:
                 cap = CAPABILITY_REQUIREMENTS.get(chain)
                 if cap:
                     needed_caps.setdefault(cap, set()).add(chain)
-                # SQL string interpolation
-                if chain == "ctx.sql.execute" and node.args:
+                # SQL string interpolation — every method that takes raw SQL
+                if chain in ("ctx.sql.execute", "ctx.sql.query",
+                             "ctx.sql.query_one", "ctx.sql.scalar") and node.args:
                     sql_arg = node.args[0]
                     if isinstance(sql_arg, ast.JoinedStr):
                         sql_lineos_with_fstrings.append(node.lineno)
@@ -398,18 +447,26 @@ def check_source(plugin_dir: Path, manifest: dict, f: Findings) -> None:
     # SQL safety
     for ln in sql_lineos_with_fstrings:
         f.error(
-            f"ctx.sql.execute at line {ln} uses an f-string — upload reviewer auto-rejects. "
+            f"ctx.sql.* at line {ln} uses an f-string — upload reviewer auto-rejects. "
             "Use $1, $2, … placeholders with a separate params list instead."
         )
     for ln in sql_lineos_with_percent:
         f.error(
-            f"ctx.sql.execute at line {ln} uses %-formatting or .format() — same SQL-injection risk. "
+            f"ctx.sql.* at line {ln} uses %-formatting or .format() — same SQL-injection risk. "
             "Use $1, $2, … placeholders instead."
         )
 
-    # Capability coverage
+    # Capability coverage — model the upload pipeline's auto-adds: declaring
+    # slash_commands implies interaction:respond, and a non-empty
+    # proxy_domains_requested implies proxy:http. Omitting those from the
+    # manifest is legitimate, so check against the effective set.
+    effective_declared = set(declared_caps)
+    if manifest.get("slash_commands"):
+        effective_declared.add("interaction:respond")
+    if manifest.get("proxy_domains_requested"):
+        effective_declared.add("proxy:http")
     for cap, calls in needed_caps.items():
-        if cap not in declared_caps:
+        if cap not in effective_declared:
             sample = ", ".join(sorted(calls)[:3])
             f.error(
                 f"call(s) {sample} require capability {cap!r} "
@@ -424,6 +481,19 @@ def check_source(plugin_dir: Path, manifest: dict, f: Findings) -> None:
     # Subtract caps that may be satisfied by less granular helpers we don't statically detect
     for cap in sorted(extra):
         f.warn(f"capability {cap!r} declared but no matching ctx.* call was detected — drop if unused")
+
+    # events:message_content — the platform's vendored validator (SDK 0.6.x
+    # _validation.py _CAP_PATTERNS) detects message-content access by these
+    # exact source patterns and rejects the upload if the capability isn't
+    # declared. Mirror it so the failure happens locally.
+    content_patterns = ('("content"', "('content'", '.get("content"', ".get('content'")
+    if any(pat in src for pat in content_patterns) and \
+            "events:message_content" not in declared_caps:
+        f.error(
+            "source accesses message content (a \"content\" key) but "
+            "'events:message_content' is not in manifest.capabilities_required — "
+            "platform upload validation rejects this"
+        )
 
     # HTTPS hosts vs proxy_domains_requested — only from real ctx.http.* call args
     for lineno, host in http_call_urls:

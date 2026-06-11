@@ -20,6 +20,89 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [1.0.10] - 2026-06-10
+
+### Changed
+- **Migrated to the rebranded SDK: `yourbot-sdk>=0.6.1,<0.7.0`** in both
+  `requirements.txt` and `requirements-dev.txt`. The platform renamed
+  MMO Maid → YourBot.gg; SDK 0.6.0 is the package rename
+  (`mmo-maid-sdk` on PyPI is now a deprecated alias that installs
+  `yourbot-sdk`), 0.6.1 adds PEP 561 typing, typed responses,
+  `ctx.discord.iter_messages`, machine-readable error codes, and
+  MockContext capability enforcement. All imports updated
+  `mmo_maid_sdk` → `yourbot_sdk` (incl. `yourbot_sdk.testing` in
+  `tests/`), which also silences the 0.6.x `DeprecationWarning`. The
+  full 190-test suite passed against 0.6.1 *before* the import rename
+  (via the wheel's compat shim) and after it.
+- **`make dev` now invokes `yourbot dev --watch`** — the `mmo`
+  console script no longer exists in SDK 0.6.x.
+- **Answer-button dispatch now uses `@plugin.on_component(prefix=CUSTOM_ID_PREFIX)`**
+  instead of hand-filtering `@plugin.on_event("interaction_create")`.
+  Prefix routing was already present in SDK 0.5.4 (verified in its
+  `on_component` signature); the handler keeps its own
+  interaction-type/prefix guards so direct calls (tests) behave
+  identically. Runtime dispatch is unchanged — the SDK registers
+  component handlers on the same `interaction_create` list, in the same
+  registration order, with no first-match short-circuit.
+- `scripts/validate_plugin.py` accepts `Plugin` imported from either
+  `yourbot_sdk` (canonical) or `mmo_maid_sdk` (legacy shim), and brand
+  prose in `README.md` / `scripts/build_release.py` now says YourBot.
+
+### Fixed
+- **`validate_plugin.py` could no longer see any `discord:read` usage.**
+  Its `CAPABILITY_REQUIREMENTS` map listed four method names that have
+  never existed in the SDK (`fetch_messages`, `fetch_member`,
+  `fetch_channel`, `fetch_role`), so Trivium's real `get_guild` /
+  `get_member` / `list_roles` calls went undetected and every run
+  emitted a false "capability 'discord:read' declared but no matching
+  ctx.* call was detected — drop if unused" WARN. Following that advice
+  would have raised `CapabilityError` on every admin-permission check
+  at runtime. The map now mirrors the SDK's own `_validation.py`
+  read-method patterns (`get_member`, `get_channel`, `get_guild`,
+  `list_roles`, `list_members`, `list_channels`, `search_members`,
+  `get_messages`). `make validate` is now warning-free (on a clean
+  tree — run `make clean` first; pytest caches still ERROR by design).
+- **Validator map audited end-to-end against the installed SDK** (every
+  entry checked against 0.6.1 `_context.py` docstrings): dropped five
+  more never-existed names (`remove_reaction`, `create_role`,
+  `delete_role`, `http.put/patch/delete`), added the missing real
+  methods for every capability (`kv.get_many`/`exists`/`count`/
+  `set_many`/`decrement`/`list_values` — Trivium calls the first two —
+  `iter_messages`, `pin/unpin_message`, `bulk_delete_messages`, thread
+  and channel-permission methods, bulk moderation, `execute_webhook`,
+  `sql.query/query_one/scalar`, `secrets.*`, `interaction.respond/
+  defer/followup/send_modal`, `http.request`). The forward
+  used-but-not-declared check now models the upload pipeline's
+  auto-adds (`slash_commands` ⇒ `interaction:respond`, proxy domains ⇒
+  `proxy:http`). `storage:secrets` and `events:message_content` are
+  recognised (provisionally Risky; the 0.6.x platform validator knows
+  both — `events:message_content` was wrongly in the legacy-ERROR
+  list), with a new local mirror of the platform's message-content
+  source check. The SQL f-string/interpolation check now also covers
+  `sql.query`/`query_one`/`scalar`, not just `execute`.
+
+### Added
+- `tests/test_meta.py::test_manifest_caps_cover_click_flow_under_strict_enforcement`
+  and `::test_manifest_caps_cover_admin_cache_refresh_under_strict_enforcement` —
+  every other test uses MockContext's grant-everything default, so a ctx
+  call gated by a capability missing from `manifest.json` would pass the
+  suite and `CapabilityError` in production. These run the answer-click
+  flow and the admin-cache refresh under exactly the manifest's six
+  capabilities (SDK 0.6.1 MockContext enforces an explicit
+  `capabilities=` list), with positive assertions so a deny-closed
+  `SdkError` path can't swallow the failure.
+
+### Notes
+- No manifest capability or slash-command changes; the upload zip
+  differs from v1.0.9 only in `manifest.json` (version), the
+  `requirements.txt` pin, and the import/decorator/docstring lines in
+  `__main__.py`. PATCH bump per policy (refactor/docs/CI).
+- The dev venv (`../mmo-maid-plugin-trivium-venv`) was recreated in
+  place: its `bin/` entry-point scripts had stale shebangs pointing at
+  a deleted in-repo `.venv`, which broke `make dev` and direct
+  `pytest`/`pip` invocation (everything had been running via
+  `python3 -m ...`).
+
 ## [1.0.9] - 2026-05-31
 
 ### Fixed

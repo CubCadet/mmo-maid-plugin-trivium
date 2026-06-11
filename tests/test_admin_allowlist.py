@@ -6,7 +6,7 @@ admin-add / admin-remove / admin-list sub-commands.
 """
 from __future__ import annotations
 
-from mmo_maid_sdk.testing import MockContext, make_event
+from yourbot_sdk.testing import MockContext, make_event
 
 from plugin_main import (
     DEFAULT_CONFIG,

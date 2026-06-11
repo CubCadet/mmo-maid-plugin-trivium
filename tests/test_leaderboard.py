@@ -1,7 +1,7 @@
 """Tests for /trivia leaderboard and /trivia stats."""
 from __future__ import annotations
 
-from mmo_maid_sdk.testing import MockContext, make_event
+from yourbot_sdk.testing import MockContext, make_event
 
 from plugin_main import (
     KV_SCORE_INDEX,

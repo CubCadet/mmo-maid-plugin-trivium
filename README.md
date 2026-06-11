@@ -2,7 +2,7 @@
 
 > Multiple-choice trivia rounds played through Discord buttons, with per-server leaderboards, per-user streaks, and optional admin-scheduled daily trivia.
 
-A plugin for [MMO Maid](https://mmomaid.com) — runs sandboxed in the platform and reacts to Discord interactions on installed servers.
+A plugin for [YourBot](https://yourbot.gg) (formerly MMO Maid) — runs sandboxed in the platform and reacts to Discord interactions on installed servers.
 
 ## What it does
 
@@ -59,7 +59,7 @@ source ../mmo-maid-plugin-trivium-venv/bin/activate
 pip install -r requirements.txt -r requirements-dev.txt
 
 # 2. Local dev loop (hot-reload + mock host)
-mmo dev --watch
+yourbot dev --watch
 
 # 3. Tests
 python -m pytest -q
@@ -89,7 +89,7 @@ The tag's version (`v1.2.3` → `1.2.3`) must match `manifest.json`'s `version` 
 
 ## Submitting for review
 
-The MMO Maid dev portal links this repo and pulls the latest tag for review. Review turnaround is typically 1–3 business days. The reviewer checks the manifest, scans for disallowed imports, validates SQL safety (Trivium uses no SQL), and re-prompts installed users on any tier shift.
+The [YourBot dev portal](https://yourbot.gg/dev) links this repo and pulls the latest tag for review. Review turnaround is typically 1–3 business days. The reviewer checks the manifest, scans for disallowed imports, validates SQL safety (Trivium uses no SQL), and re-prompts installed users on any tier shift.
 
 ## Project structure
 
@@ -98,7 +98,7 @@ Runtime files (in the upload zip):
 ```
 manifest.json          slash command schema + capabilities
 __main__.py            entire plugin runtime
-requirements.txt       pinned to mmo-maid-sdk 0.5.x
+requirements.txt       pinned to yourbot-sdk 0.6.x
 ```
 
 Repo-only (stripped at release time by `scripts/build_release.py`):
@@ -107,7 +107,7 @@ Repo-only (stripped at release time by `scripts/build_release.py`):
 README.md              this file
 LICENSE                MIT
 CHANGELOG.md           version history
-tests/                 pytest suite (~120 cases using MockContext)
+tests/                 pytest suite (~190 cases using MockContext)
 .github/workflows/     CI + release automation
 .gitignore .gitattributes Makefile requirements-dev.txt
 scripts/               validate_plugin.py + build_release.py

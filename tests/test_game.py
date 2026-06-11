@@ -3,7 +3,7 @@ streak handling, click dispatch (version mismatch, single-player guard,
 open-mode first-correct dedup, expired round)."""
 from __future__ import annotations
 
-from mmo_maid_sdk.testing import MockContext, make_event
+from yourbot_sdk.testing import MockContext, make_event
 
 from plugin_main import (
     CUSTOM_ID_VERSION,

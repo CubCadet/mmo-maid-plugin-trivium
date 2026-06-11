@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 
-from mmo_maid_sdk.testing import MockClock, MockContext, make_event
+from yourbot_sdk.testing import MockClock, MockContext, make_event
 
 from plugin_main import (
     COOLDOWN_SECONDS,
