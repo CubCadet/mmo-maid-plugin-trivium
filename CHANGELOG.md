@@ -20,6 +20,24 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [1.0.11] - 2026-06-18
+
+### Changed
+- **Adopted `yourbot-sdk>=0.7.1,<0.8.0`** in both `requirements.txt` and
+  `requirements-dev.txt` (was `>=0.6.1,<0.7.0`). 0.7.x is a pre-1.0 minor,
+  so it was reviewed as a breaking-class bump rather than auto-applied.
+  Verified before adopting: the public API surface (top-level package +
+  `yourbot_sdk.testing`) is identical between 0.6.1 and 0.7.1, every symbol
+  Trivium imports still resolves, and the full 192-test suite passes
+  unchanged against 0.7.1. No source changes were required. `mmo-maid-sdk`
+  on PyPI remains a deprecated alias resolving to the same wheel.
+- `README.md` repo-layout note now reads "pinned to yourbot-sdk 0.7.x".
+
+### Notes
+- No manifest capability or slash-command changes; the upload zip differs
+  from v1.0.10 only in `manifest.json` (version) and the `requirements.txt`
+  pin. PATCH bump per policy (dependency adoption, no behaviour change).
+
 ## [1.0.10] - 2026-06-10
 
 ### Changed

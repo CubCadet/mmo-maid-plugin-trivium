@@ -98,7 +98,7 @@ Runtime files (in the upload zip):
 ```
 manifest.json          slash command schema + capabilities
 __main__.py            entire plugin runtime
-requirements.txt       pinned to yourbot-sdk 0.6.x
+requirements.txt       pinned to yourbot-sdk 0.7.x
 ```
 
 Repo-only (stripped at release time by `scripts/build_release.py`):
