@@ -20,6 +20,54 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [1.0.12] - 2026-07-07
+
+### Changed
+- **Widened the SDK pin to `yourbot-sdk>=0.7.1,<0.9.0`** (was `<0.8.0`) in both
+  `requirements.txt` and `requirements-dev.txt`, adopting 0.8.2. 0.8.x is a
+  pre-1.0 minor (breaking-class), so it was reviewed before adopting: the public
+  API surface (top-level package + `yourbot_sdk.testing`) is byte-identical to
+  0.7.1, every symbol Trivium imports resolves, and the full suite passes
+  unchanged against a real 0.8.2 install. Everything new in 0.8.0–0.8.2 is
+  additive (a WebSocket feature — `ctx.ws`, `on_ws_*`, and the `proxy:websocket`
+  capability) that Trivium does not use, so no source or manifest changes were
+  required. Dependency adoption with no behaviour change — folded into this
+  PATCH.
+
+### Fixed
+- **Daily trivia could silently skip a full day after a transient failure.**
+  `_maybe_post_daily` claimed a 24h ephemeral dedup (`dedup:daily:{date}`,
+  `ttl_seconds=86400`) *before* posting, but the durable `daily:{date}` history
+  record — the real day-idempotency guard — is written only on a *successful*
+  post. So a transient failure at the configured daily minute (both question
+  sources down, or the Discord send raising `SdkError`) burned the dedup for a
+  full 24h while no durable record existed, suppressing the daily for the rest
+  of the day even after the source/Discord recovered. The ephemeral dedup is now
+  a short 5-minute concurrency/retry-throttle window (`DAILY_POST_ATTEMPT_TTL`)
+  guarding only the post critical section; `daily:{date}` remains the sole
+  day guard, so a failed attempt now only pauses retries for a few minutes and
+  the `@plugin.schedule(60)` tick and the `cmd_play` / `message_create`
+  backstops retry later the same day. (`__main__.py` `_maybe_post_daily`.)
+- **Hardened the corner the shorter window exposes:** if a daily posts
+  successfully but its durable `daily:{date}` record can't be persisted
+  (`KvQuotaError`), a best-effort ephemeral fallback flag
+  (`posted:daily:{date}`, `DAILY_POST_QUOTA_FALLBACK_TTL` = 24h) now guards the
+  day so the already-sent daily isn't re-posted every few minutes until KV
+  quota recovers. Previously the 24h dedup masked this incidentally; the short
+  window would otherwise have re-posted. (`_post_daily_question`,
+  `_maybe_post_daily`.)
+
+### Tests
+- Added two regression tests to `tests/test_daily.py` (suite is now 194, was
+  192):
+  - `test_failed_post_does_not_suppress_the_whole_day` — a failed daily post
+    leaves `daily:{date}` unwritten, and once the short attempt window lapses
+    (driven by `MockClock`) a later same-day tick posts successfully. Verified
+    to fail if the dedup TTL regresses to 24h.
+  - `test_post_that_cannot_persist_its_guard_does_not_double_post` — a post that
+    succeeds but can't persist its guard (`KvQuotaError`) is not re-posted after
+    the dedup window lapses. Verified to fail without the fallback flag.
+
 ## [1.0.11] - 2026-06-18
 
 ### Changed

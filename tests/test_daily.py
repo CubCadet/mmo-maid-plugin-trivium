@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone, timedelta
 
-from yourbot_sdk.testing import MockContext, make_event
+from yourbot_sdk import KvQuotaError, SdkError
+from yourbot_sdk.testing import MockClock, MockContext, make_event
 
 from plugin_main import (
     DEFAULT_CONFIG,
@@ -172,6 +173,106 @@ def test_no_question_available_skips_post():
     # daily history was NOT written (we don't pretend a post happened)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     assert ctx.kv.get(kv_daily(today)) is None
+
+
+def test_failed_post_does_not_suppress_the_whole_day():
+    """Regression: a transient failure at the daily minute must NOT burn the
+    day. _maybe_post_daily claims only a short ephemeral attempt window before
+    posting; because the durable daily:{date} record (the real day guard) is
+    written solely on a successful post, a failed attempt leaves it unset, so
+    once the attempt window lapses a later same-day tick still posts. Before the
+    fix the dedup was held for a full 24h, silently skipping the daily for the
+    rest of the day even after the source/Discord recovered."""
+    clock = MockClock(start=1_000.0)
+    ctx = MockContext(clock=clock)
+    _seed_cfg(ctx, time_utc="00:00")               # always past target
+    ctx.http.mock_response("api_token.php", status=200,
+                           body='{"response_code": 0, "token": "T"}')
+    # Two distinct questions: attempt 1 consumes the first (and pushes it to the
+    # seen-ring), so the retry has a fresh one to post rather than re-picking a
+    # now-"seen" question.
+    two_q_body = json.dumps({
+        "response_code": 0,
+        "results": [
+            {"category": "General Knowledge", "type": "multiple",
+             "difficulty": "medium", "question": "First question?",
+             "correct_answer": "C1", "incorrect_answers": ["w1", "w2", "w3"]},
+            {"category": "General Knowledge", "type": "multiple",
+             "difficulty": "medium", "question": "Second question?",
+             "correct_answer": "C2", "incorrect_answers": ["x1", "x2", "x3"]},
+        ],
+    })
+    ctx.http.mock_response("api.php", status=200, body=two_q_body)
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # First attempt: the Discord send fails transiently.
+    healthy_send = ctx.discord.send_message
+
+    def _flaky_send(**kwargs):
+        raise SdkError("discord unavailable")
+
+    ctx.discord.send_message = _flaky_send
+    _maybe_post_daily(ctx)
+    assert ctx.messages_sent == []                 # nothing posted
+    assert ctx.kv.get(kv_daily(today)) is None     # day NOT marked
+
+    # Discord recovers; a later same-day tick (past the short attempt window,
+    # far under 24h) must retry and post.
+    ctx.discord.send_message = healthy_send
+    clock.advance(600)                             # > DAILY_POST_ATTEMPT_TTL (300s), << 86400
+    _maybe_post_daily(ctx)
+    assert len(ctx.messages_sent) == 1             # posted on retry
+    assert isinstance(ctx.kv.get(kv_daily(today)), dict)
+
+
+def test_post_that_cannot_persist_its_guard_does_not_double_post():
+    """Companion to the fix above: shortening the dedup must NOT let a daily be
+    re-posted when the post itself succeeded but the durable kv_daily(today)
+    guard couldn't be written (KvQuotaError). A best-effort ephemeral fallback
+    flag holds the day so we don't spam the channel every few minutes while KV
+    quota is exhausted."""
+    clock = MockClock(start=1_000.0)
+    ctx = MockContext(clock=clock)
+    _seed_cfg(ctx, time_utc="00:00")
+    ctx.http.mock_response("api_token.php", status=200,
+                           body='{"response_code": 0, "token": "T"}')
+    # Two distinct questions so a (wrongly) re-posting retry would have fresh
+    # material — i.e. the fallback flag, not question exhaustion, is what stops
+    # the double post.
+    two_q_body = json.dumps({
+        "response_code": 0,
+        "results": [
+            {"category": "General Knowledge", "type": "multiple",
+             "difficulty": "medium", "question": "First question?",
+             "correct_answer": "C1", "incorrect_answers": ["w1", "w2", "w3"]},
+            {"category": "General Knowledge", "type": "multiple",
+             "difficulty": "medium", "question": "Second question?",
+             "correct_answer": "C2", "incorrect_answers": ["x1", "x2", "x3"]},
+        ],
+    })
+    ctx.http.mock_response("api.php", status=200, body=two_q_body)
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Make only the durable daily:{date} write fail with KvQuotaError; every
+    # other KV write (inflight, seen-ring, batch cache) still succeeds.
+    healthy_set = ctx.kv.set
+
+    def _quota_on_daily(key, value, **kwargs):
+        if key.startswith("daily:"):
+            raise KvQuotaError("kv quota exhausted")
+        return healthy_set(key, value, **kwargs)
+
+    ctx.kv.set = _quota_on_daily
+    _maybe_post_daily(ctx)
+    assert len(ctx.messages_sent) == 1             # the daily WAS posted
+    assert ctx.kv.get(kv_daily(today)) is None     # but the guard couldn't persist
+
+    # A later same-day tick (past the short dedup window) must NOT re-post it.
+    clock.advance(600)                             # > DAILY_POST_ATTEMPT_TTL
+    _maybe_post_daily(ctx)
+    assert len(ctx.messages_sent) == 1             # still 1 — no double post
 
 
 # ── Future time gate ───────────────────────────────────────────────────────

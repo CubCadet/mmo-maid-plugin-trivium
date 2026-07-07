@@ -57,7 +57,7 @@ from yourbot_sdk import (
 # Module-level version constant. Kept in sync with manifest.json by a regression
 # test in tests/test_meta.py. Used in the on_ready log because ctx.version is
 # empty under v0.5.2 pool-mode workers.
-__version__ = "1.0.11"
+__version__ = "1.0.12"
 
 plugin = Plugin()
 
@@ -82,6 +82,18 @@ INFLIGHT_GRACE_SECONDS = 5
 FETCHER_BUDGET = 12.0                  # seconds — hung fetcher fails closed
 DEFAULT_TIMER_SECONDS = 20
 DAILY_TIMER_SECONDS = 60 * 60          # 1h answer window for daily
+DAILY_POST_ATTEMPT_TTL = 5 * 60        # 5m — guards only the daily post
+                                       # critical section against concurrent
+                                       # ticks/backstops. The durable
+                                       # kv_daily(today) record is the real
+                                       # day-idempotency guard; keeping this
+                                       # short means a transient failure only
+                                       # throttles retries for minutes instead
+                                       # of suppressing the daily all day.
+DAILY_POST_QUOTA_FALLBACK_TTL = 24 * 60 * 60  # 24h — best-effort ephemeral day
+                                       # guard for the rare case where a daily
+                                       # posted OK but its durable kv_daily
+                                       # record couldn't be persisted (KV quota).
 
 # Negative-cache reasons + per-reason TTLs.
 RATE_LIMITED = "rate_limited"
@@ -295,6 +307,10 @@ def eph_dedup_answer(game_id: str) -> str:
 
 def eph_dedup_daily(date_str: str) -> str:
     return f"dedup:daily:{date_str}"
+
+
+def eph_daily_posted(date_str: str) -> str:
+    return f"posted:daily:{date_str}"
 
 
 def eph_expired(game_id: str) -> str:
@@ -2075,9 +2091,22 @@ def _maybe_post_daily(ctx: Context, *, request_id: str = "") -> None:
         return
     if now < target:
         return
+    # Durable day-idempotency guard: once today's daily is posted this record
+    # exists (30d TTL), so every later tick/backstop short-circuits here.
     if ctx.kv.exists(kv_daily(today_str)):
         return
-    if not ctx.ephemeral.dedup(eph_dedup_daily(today_str), ttl_seconds=86400):
+    # Best-effort fallback guard: a prior post today succeeded but its durable
+    # record couldn't be persisted (KvQuotaError below). Without this the short
+    # window would re-post the already-sent daily every few minutes until quota
+    # recovers.
+    if ctx.ephemeral.flag_check(eph_daily_posted(today_str)):
+        return
+    # Short concurrency guard around the post critical section only — NOT a day
+    # guard. If _post_daily_question below returns early (no question, or the
+    # Discord send raises) kv_daily(today) is never written, so this must expire
+    # quickly or a transient outage at the daily minute would burn the gate and
+    # suppress the daily for the rest of the day.
+    if not ctx.ephemeral.dedup(eph_dedup_daily(today_str), ttl_seconds=DAILY_POST_ATTEMPT_TTL):
         return
     _post_daily_question(ctx, cfg, today_str, request_id=request_id)
 
@@ -2162,7 +2191,11 @@ def _post_daily_question(ctx: Context, cfg: dict, today_str: str,
     try:
         ctx.kv.set(kv_daily(today_str), history, ttl_seconds=DAILY_HISTORY_TTL)
     except KvQuotaError:
-        pass
+        # Durable day guard couldn't be persisted, but the daily WAS posted.
+        # Drop a best-effort ephemeral marker so we don't re-post it every few
+        # minutes (the short dedup window) until KV quota recovers.
+        ctx.ephemeral.flag_set(eph_daily_posted(today_str),
+                               ttl_seconds=DAILY_POST_QUOTA_FALLBACK_TTL)
 
     ctx.log("daily trivia posted",
             level="info", tags=["trivium", "daily"],
