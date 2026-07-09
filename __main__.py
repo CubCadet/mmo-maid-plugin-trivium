@@ -57,7 +57,7 @@ from yourbot_sdk import (
 # Module-level version constant. Kept in sync with manifest.json by a regression
 # test in tests/test_meta.py. Used in the on_ready log because ctx.version is
 # empty under v0.5.2 pool-mode workers.
-__version__ = "1.0.12"
+__version__ = "1.0.13"
 
 plugin = Plugin()
 
@@ -76,6 +76,19 @@ COOLDOWN_SECONDS = 3
 SEEN_RING_CAP = 200
 
 OTDB_TOKEN_TTL = 6 * 60 * 60           # 6h — matches OTDB's idle timeout
+OTDB_BATCH_AMOUNT = 50                 # normal batch size per fetch
+OTDB_SMALL_POOL_AMOUNT = 10            # rc=1 retry — pools smaller than 50
+                                       # (Gadgets, Politics×hard, …) exist and
+                                       # must stay playable
+OTDB_RATE_WINDOW = 6.0                 # OTDB allows one api.php call per IP
+                                       # per ~5s (verified live: an immediate
+                                       # second call 429s; spaced ≥5-6s it
+                                       # succeeds) — the rc=1 retry must wait
+                                       # out the window. api_token.php does
+                                       # not count against it.
+SMALL_POOL_HINT_TTL = 30 * 24 * 60 * 60  # 30d — remember small pools so
+                                       # future fetches ask for 10 up-front
+                                       # and skip the paced retry entirely
 BATCH_CACHE_TTL = 24 * 60 * 60         # 24h
 DAILY_HISTORY_TTL = 30 * 24 * 60 * 60  # 30d
 INFLIGHT_GRACE_SECONDS = 5
@@ -288,6 +301,10 @@ def kv_qbatch_neg(source: str, category: str, difficulty: str) -> str:
     return f"qbatch_neg:{source}:{category}:{difficulty}"
 
 
+def kv_small_pool(category: str, difficulty: str) -> str:
+    return f"smallpool:{category}:{difficulty}"
+
+
 def kv_daily(date_str: str) -> str:
     return f"daily:{date_str}"
 
@@ -371,13 +388,26 @@ def add_to_score_index(ctx: Context, user_id: str) -> None:
     try:
         ctx.kv.set(KV_SCORE_INDEX, idx)
     except KvQuotaError:
-        pass
+        # The user's score record exists (stats work) but they won't appear
+        # on the leaderboard — log it so a frozen leaderboard is diagnosable.
+        ctx.log("KV quota; score index write dropped — user missing from leaderboard",
+                level="warning", tags=["trivium", "kv", "leaderboard"],
+                user_id=user_id, index_size=str(len(idx)))
 
 
 def _write_score(ctx: Context, user_id: str, rec: dict) -> None:
     """Save a score record and keep the score index in sync. Use this
-    instead of ctx.kv.set directly anywhere a score record gets written."""
-    ctx.kv.set(kv_score(user_id), rec)
+    instead of ctx.kv.set directly anywhere a score record gets written.
+
+    KvQuotaError degrades to a warning: the click loses its points, but the
+    interaction must still get its response and the round must still
+    finalize — a quota-full server otherwise sees every answer click fail."""
+    try:
+        ctx.kv.set(kv_score(user_id), rec)
+    except KvQuotaError:
+        ctx.log("KV quota; score write dropped",
+                level="warning", tags=["trivium", "kv"], user_id=user_id)
+        return
     add_to_score_index(ctx, user_id)
 
 
@@ -572,14 +602,23 @@ def _ensure_otdb_token(ctx: Context, *, force_refresh: bool = False) -> str | No
     return token
 
 
+# Indirection so tests can patch the rc=1 retry pacing without a real 6s
+# sleep (MockClock only drives ctx-internal TTLs, not module time calls).
+_sleep = time.sleep
+
+
 def fetch_otdb(ctx: Context, category: str, difficulty: str) -> FetchResult:
-    """Fetch a 50-question batch from Open Trivia DB. Returns ok(list) or neg(reason).
+    """Fetch a question batch from Open Trivia DB. Returns ok(list) or neg(reason).
 
     On response_code=3 (token expired) the call refreshes the token and
-    retries once in-band. On response_code=4 (token exhausted for this
-    category × difficulty under the current token) it returns
-    TOKEN_EXHAUSTED — the dispatcher then falls through to The Trivia API
-    while leaving the token alive to keep suppressing other categories.
+    retries once in-band. On response_code=1 (pool smaller than the batch
+    size) it waits out OTDB's per-IP rate window, retries once with
+    OTDB_SMALL_POOL_AMOUNT, and remembers the small pool in KV so future
+    fetches ask for the small amount up-front (no second call, no wait).
+    On response_code=4 (token exhausted for this category × difficulty
+    under the current token) it returns TOKEN_EXHAUSTED — the dispatcher
+    then falls through to The Trivia API while leaving the token alive to
+    keep suppressing other categories.
     """
     otdb_id = OTDB_CATEGORY_IDS.get(category)
     if otdb_id is None:
@@ -587,17 +626,21 @@ def fetch_otdb(ctx: Context, category: str, difficulty: str) -> FetchResult:
 
     started = time.monotonic()
     token = _ensure_otdb_token(ctx)
-    base = f"https://opentdb.com/api.php?amount=50&category={otdb_id}&type=multiple"
-    if difficulty in ("easy", "medium", "hard"):
-        base += f"&difficulty={difficulty}"
+    last_api_call_at = 0.0
 
     def _budget_remaining() -> bool:
         return (time.monotonic() - started) < FETCHER_BUDGET
 
-    def _do_call(tok: str | None) -> tuple[str, object]:
+    def _do_call(tok: str | None, amount: int = OTDB_BATCH_AMOUNT) -> tuple[str, object]:
+        nonlocal last_api_call_at
         if not _budget_remaining():
             return ("neg", TIMEOUT)
-        url = base + (f"&token={tok}" if tok else "")
+        url = f"https://opentdb.com/api.php?amount={amount}&category={otdb_id}&type=multiple"
+        if difficulty in ("easy", "medium", "hard"):
+            url += f"&difficulty={difficulty}"
+        if tok:
+            url += f"&token={tok}"
+        last_api_call_at = time.monotonic()
         try:
             resp = ctx.http.get(url)
         except RateLimitError:
@@ -628,10 +671,34 @@ def fetch_otdb(ctx: Context, category: str, difficulty: str) -> FetchResult:
             return ("neg", RATE_LIMITED)
         return ("neg", FETCH_ERROR)
 
-    outcome, payload = _do_call(token)
+    # rc=1 means the pool for this category × difficulty holds fewer than
+    # `amount` questions, NOT that it's empty — e.g. Gadgets never fills 50
+    # at any difficulty. A KV hint remembers known small pools so they're
+    # fetched with the small amount up-front.
+    small_pool = bool(ctx.kv.get(kv_small_pool(category, difficulty)))
+    first_amount = OTDB_SMALL_POOL_AMOUNT if small_pool else OTDB_BATCH_AMOUNT
+
+    outcome, payload = _do_call(token, amount=first_amount)
     if outcome == "token_expired":
-        new_tok = _ensure_otdb_token(ctx, force_refresh=True)
-        outcome, payload = _do_call(new_tok)
+        token = _ensure_otdb_token(ctx, force_refresh=True)
+        outcome, payload = _do_call(token, amount=first_amount)
+    if outcome == "neg" and payload == NO_QUESTIONS and not small_pool:
+        # First discovery of a small pool. Persist the hint, then retry once
+        # with the small amount — but OTDB rate-limits api.php to one call
+        # per IP per ~5s, so the retry must wait out the window (an immediate
+        # second call deterministically 429s). Budget check: skip the retry
+        # rather than blow FETCHER_BUDGET; the hint makes the next fetch
+        # succeed in one paced call either way.
+        try:
+            ctx.kv.set(kv_small_pool(category, difficulty), True,
+                       ttl_seconds=SMALL_POOL_HINT_TTL)
+        except KvQuotaError:
+            pass
+        wait = OTDB_RATE_WINDOW - (time.monotonic() - last_api_call_at)
+        if (time.monotonic() - started) + max(wait, 0) < FETCHER_BUDGET - 1.0:
+            if wait > 0:
+                _sleep(wait)
+            outcome, payload = _do_call(token, amount=OTDB_SMALL_POOL_AMOUNT)
 
     if outcome == "neg":
         return FetchResult.neg(payload if isinstance(payload, str) else FETCH_ERROR)
@@ -1330,8 +1397,30 @@ def cmd_play(ctx: Context, event: dict, opts: dict) -> None:
         ctx.kv.set(kv_inflight(game_id), inflight,
                    ttl_seconds=timer_seconds + INFLIGHT_GRACE_SECONDS)
     except KvQuotaError:
+        # Without the inflight record no click can ever score this round —
+        # leaving the message up with live buttons and telling the starter
+        # "round started" would be a lie. Take it down and report the truth.
         ctx.log("KV quota; could not save inflight", level="error",
                 tags=["trivium", "kv"], request_id=request_id, game_id=game_id)
+        if message_id:
+            try:
+                ctx.discord.edit_message(
+                    channel_id=channel_resolved, message_id=message_id,
+                    content="⚠️ This round couldn't start — server storage is full.",
+                    embeds=[], components=[],
+                )
+            except Exception:
+                # Best-effort: the transport can raise plain RuntimeError for
+                # unclassified runner errors, and pre-0.5.3 runtimes TypeError
+                # on the components kwarg — neither may block the truthful
+                # followup below.
+                pass
+        ctx.interaction.followup(
+            content=("Couldn't start the round — this server's trivia storage "
+                     "is full. Try again later."),
+            ephemeral=True,
+        )
+        return
 
     ctx.metrics.record("trivium_round_started", tags={
         "mode": mode, "difficulty": qdiff, "source": question.get("source") or "",
@@ -1448,6 +1537,16 @@ def on_button_click(ctx: Context, event: dict) -> None:
                 ephemeral=True, allowed_mentions={"parse": []},
             )
             return
+        # Same atomic gate open mode uses for first-correct-wins: a rapid
+        # double-click delivers two interaction_create events that can both
+        # read the inflight before the first finalize deletes it — without
+        # the gate both clicks score (double points / double streak-break).
+        if not ctx.ephemeral.dedup(eph_dedup_answer(game_id),
+                                   ttl_seconds=timer + INFLIGHT_GRACE_SECONDS):
+            ctx.interaction.respond(
+                content="You already answered this round.", ephemeral=True,
+            )
+            return
         if is_correct:
             pts = award_points(ctx, clicker_uid, difficulty, is_daily=is_daily)
             ctx.interaction.respond(content=f"✅ Correct! +{pts} points.", ephemeral=True)
@@ -1544,8 +1643,22 @@ def trivia_root(ctx: Context, event: dict) -> None:
                 content="Something went wrong handling that command. Try again.",
                 ephemeral=True,
             )
-        except SdkError:
-            pass
+        except Exception:
+            # Not just SdkError: the transport raises plain RuntimeError for
+            # unclassified RPC failures — in particular the double-ack when
+            # the sub-handler already responded OR DEFERRED before crashing
+            # (cmd_config and cmd_play both defer up-front). A deferred
+            # interaction can still be answered via followup; without it the
+            # user stares at an eternal "thinking…". Letting the error escape
+            # would also count a benign cleanup failure against the platform
+            # circuit breaker.
+            try:
+                ctx.interaction.followup(
+                    content="Something went wrong handling that command. Try again.",
+                    ephemeral=True,
+                )
+            except Exception:
+                pass
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1731,6 +1844,12 @@ def cmd_config(ctx: Context, event: dict, opts: dict) -> None:
         _config_admin_bootstrap(ctx, event, cfg)
         return
 
+    # has_manage_guild can make up to three Discord REST calls on a cold
+    # admin cache (get_guild + list_roles + get_member), each brokered
+    # through the platform proxy — one slow hop blows the 3-second
+    # interaction window. Defer first; everything below uses followup().
+    ctx.interaction.defer(ephemeral=True)
+
     allowed, src = has_manage_guild(ctx, event)
     if not allowed:
         ctx.log("trivia config denied",
@@ -1745,7 +1864,7 @@ def cmd_config(ctx: Context, event: dict, opts: dict) -> None:
         # path becomes available too and this stays as a UX nicety.
         admins = cfg.get("admin_user_ids") or []
         if not isinstance(admins, list) or not admins:
-            ctx.interaction.respond(
+            ctx.interaction.followup(
                 content=(
                     "Trivium has no admins configured yet. "
                     "Click below to claim admin for this server (one-time)."
@@ -1758,7 +1877,7 @@ def cmd_config(ctx: Context, event: dict, opts: dict) -> None:
                 ))],
             )
         else:
-            ctx.interaction.respond(
+            ctx.interaction.followup(
                 content=(
                     "You need to be a Trivium admin to run this command. "
                     "Ask an existing admin to add you via `/trivia config "
@@ -1789,7 +1908,7 @@ def cmd_config(ctx: Context, event: dict, opts: dict) -> None:
     elif action in ("adminremove", "admin-remove"):
         _config_admin_remove(ctx, event, cfg, raw_value)
     else:
-        ctx.interaction.respond(content=CONFIG_HELP, ephemeral=True)
+        ctx.interaction.followup(content=CONFIG_HELP, ephemeral=True)
 
 
 # ── Admin allowlist sub-commands ───────────────────────────────────────────
@@ -1850,13 +1969,13 @@ def _config_admin_bootstrap(ctx: Context, event: dict, cfg: dict) -> None:
 def _config_admin_list(ctx: Context, cfg: dict) -> None:
     admins = cfg.get("admin_user_ids") or []
     if not isinstance(admins, list) or not admins:
-        ctx.interaction.respond(
+        ctx.interaction.followup(
             content="No Trivium admins configured. Run `/trivia config action:admin-bootstrap` first.",
             ephemeral=True,
         )
         return
     lines = [f"• <@{uid}>" for uid in admins if isinstance(uid, str)]
-    ctx.interaction.respond(
+    ctx.interaction.followup(
         content="**Trivium admins:**\n" + "\n".join(lines),
         ephemeral=True, allowed_mentions={"parse": []},
     )
@@ -1865,7 +1984,7 @@ def _config_admin_list(ctx: Context, cfg: dict) -> None:
 def _config_admin_add(ctx: Context, cfg: dict, value) -> None:
     new_id = _resolve_user_id(value)
     if not new_id:
-        ctx.interaction.respond(
+        ctx.interaction.followup(
             content="Couldn't parse the user. Pass `value:@user` or a raw user ID.",
             ephemeral=True,
         )
@@ -1874,7 +1993,7 @@ def _config_admin_add(ctx: Context, cfg: dict, value) -> None:
     if not isinstance(admins, list):
         admins = []
     if new_id in admins:
-        ctx.interaction.respond(
+        ctx.interaction.followup(
             content=f"<@{new_id}> is already a Trivium admin.",
             ephemeral=True, allowed_mentions={"parse": []},
         )
@@ -1884,7 +2003,7 @@ def _config_admin_add(ctx: Context, cfg: dict, value) -> None:
     save_config(ctx, cfg)
     ctx.log("trivia admin added", level="info", tags=["trivium", "admin"],
             user_id=new_id)
-    ctx.interaction.respond(
+    ctx.interaction.followup(
         content=f"Added <@{new_id}> as a Trivium admin.",
         ephemeral=True, allowed_mentions={"parse": []},
     )
@@ -1893,21 +2012,21 @@ def _config_admin_add(ctx: Context, cfg: dict, value) -> None:
 def _config_admin_remove(ctx: Context, event: dict, cfg: dict, value) -> None:
     target = _resolve_user_id(value)
     if not target:
-        ctx.interaction.respond(
+        ctx.interaction.followup(
             content="Couldn't parse the user. Pass `value:@user` or a raw user ID.",
             ephemeral=True,
         )
         return
     admins = cfg.get("admin_user_ids") or []
     if not isinstance(admins, list) or target not in admins:
-        ctx.interaction.respond(
+        ctx.interaction.followup(
             content=f"<@{target}> isn't currently a Trivium admin.",
             ephemeral=True, allowed_mentions={"parse": []},
         )
         return
     # Guard against locking everyone out: refuse to remove the last admin.
     if len(admins) == 1:
-        ctx.interaction.respond(
+        ctx.interaction.followup(
             content=(
                 "Can't remove the last admin — that would lock everyone out. "
                 "Add another admin first with `/trivia config action:admin-add value:@user`."
@@ -1921,7 +2040,7 @@ def _config_admin_remove(ctx: Context, event: dict, cfg: dict, value) -> None:
     ctx.log("trivia admin removed", level="info", tags=["trivium", "admin"],
             user_id=target,
             actor=str(event.get("user_id") or ""))
-    ctx.interaction.respond(
+    ctx.interaction.followup(
         content=f"Removed <@{target}> from Trivium admins.",
         ephemeral=True, allowed_mentions={"parse": []},
     )
@@ -1944,7 +2063,7 @@ def _config_show(ctx: Context, cfg: dict) -> None:
         {"name": "Mode",               "value": str(cfg.get("mode") or "single"), "inline": True},
         {"name": "Admins",             "value": admin_line, "inline": False},
     ]
-    ctx.interaction.respond(
+    ctx.interaction.followup(
         embeds=[{
             "title": "Trivium config",
             "color": 0x5865F2,
@@ -1968,14 +2087,14 @@ def _config_set_channel(ctx: Context, event: dict, cfg: dict, value) -> None:
     if not new_id:
         new_id = str(event.get("channel_id") or "")
     if not new_id:
-        ctx.interaction.respond(
+        ctx.interaction.followup(
             content="Couldn't resolve a channel. Run this in the target channel, or pass `value:#channel`.",
             ephemeral=True,
         )
         return
     cfg["daily_channel_id"] = new_id
     save_config(ctx, cfg)
-    ctx.interaction.respond(
+    ctx.interaction.followup(
         content=f"Daily channel set to <#{new_id}>.",
         ephemeral=True, allowed_mentions={"parse": []},
     )
@@ -1983,14 +2102,14 @@ def _config_set_channel(ctx: Context, event: dict, cfg: dict, value) -> None:
 
 def _config_set_time(ctx: Context, cfg: dict, value) -> None:
     if not isinstance(value, str) or not HHMM_RE.match(value.strip()):
-        ctx.interaction.respond(
+        ctx.interaction.followup(
             content="Time must be in `HH:MM` UTC (00:00–23:59). Example: `value:09:00`.",
             ephemeral=True,
         )
         return
     cfg["daily_time_utc"] = value.strip()
     save_config(ctx, cfg)
-    ctx.interaction.respond(
+    ctx.interaction.followup(
         content=f"Daily time set to {cfg['daily_time_utc']} UTC.",
         ephemeral=True,
     )
@@ -1999,53 +2118,53 @@ def _config_set_time(ctx: Context, cfg: dict, value) -> None:
 def _config_set_difficulty(ctx: Context, cfg: dict, value) -> None:
     v = value.lower().strip() if isinstance(value, str) else ""
     if v not in VALID_DIFFICULTIES:
-        ctx.interaction.respond(
+        ctx.interaction.followup(
             content="Difficulty must be `easy`, `medium`, `hard`, or `any`.",
             ephemeral=True,
         )
         return
     cfg["default_difficulty"] = v
     save_config(ctx, cfg)
-    ctx.interaction.respond(content=f"Default difficulty set to `{v}`.", ephemeral=True)
+    ctx.interaction.followup(content=f"Default difficulty set to `{v}`.", ephemeral=True)
 
 
 def _config_set_timer(ctx: Context, cfg: dict, value) -> None:
     try:
         n = int(str(value).strip())
     except (TypeError, ValueError):
-        ctx.interaction.respond(content="Timer must be an integer between 10 and 60 seconds.", ephemeral=True)
+        ctx.interaction.followup(content="Timer must be an integer between 10 and 60 seconds.", ephemeral=True)
         return
     if n < 10 or n > 60:
-        ctx.interaction.respond(content="Timer must be between 10 and 60 seconds.", ephemeral=True)
+        ctx.interaction.followup(content="Timer must be between 10 and 60 seconds.", ephemeral=True)
         return
     cfg["timer_seconds"] = n
     save_config(ctx, cfg)
-    ctx.interaction.respond(content=f"Answer timer set to {n}s.", ephemeral=True)
+    ctx.interaction.followup(content=f"Answer timer set to {n}s.", ephemeral=True)
 
 
 def _config_set_mode(ctx: Context, cfg: dict, value) -> None:
     v = value.lower().strip() if isinstance(value, str) else ""
     if v not in VALID_MODES:
-        ctx.interaction.respond(
+        ctx.interaction.followup(
             content="Mode must be `single` (one user plays the round they started) or `open` (any member can answer, first correct wins).",
             ephemeral=True,
         )
         return
     cfg["mode"] = v
     save_config(ctx, cfg)
-    ctx.interaction.respond(content=f"Mode set to `{v}`.", ephemeral=True)
+    ctx.interaction.followup(content=f"Mode set to `{v}`.", ephemeral=True)
 
 
 def _config_set_category(ctx: Context, cfg: dict, value) -> None:
     if not isinstance(value, str) or value not in OTDB_CATEGORY_IDS:
-        ctx.interaction.respond(
+        ctx.interaction.followup(
             content="Category must match one of the 24 supported categories — try `/trivia play` to see them in the dropdown.",
             ephemeral=True,
         )
         return
     cfg["daily_category"] = value
     save_config(ctx, cfg)
-    ctx.interaction.respond(
+    ctx.interaction.followup(
         content=f"Daily category set to **{value}**.",
         ephemeral=True, allowed_mentions={"parse": []},
     )
@@ -2171,9 +2290,26 @@ def _post_daily_question(ctx: Context, cfg: dict, today_str: str,
         ctx.kv.set(kv_inflight(game_id), inflight,
                    ttl_seconds=DAILY_TIMER_SECONDS + INFLIGHT_GRACE_SECONDS)
     except KvQuotaError:
+        # No inflight record → no click can score today's daily. Mark the
+        # posted message so users aren't clicking dead buttons. The day
+        # guard below is still written (or its quota fallback fires), so
+        # the broken daily is not re-posted.
         ctx.log("KV quota; could not save daily inflight",
                 level="error", tags=["trivium", "kv", "daily"],
                 request_id=request_id, game_id=game_id)
+        if message_id:
+            try:
+                ctx.discord.edit_message(
+                    channel_id=channel_id, message_id=message_id,
+                    content=("⚠️ Today's daily trivia couldn't start — server "
+                             "storage is full."),
+                    embeds=[], components=[],
+                )
+            except Exception:
+                # Best-effort: an escaping RuntimeError/TypeError here would
+                # abort before the day-guard write below, re-posting a dead
+                # daily every 5 minutes for the rest of the day.
+                pass
 
     history = {
         "question": question["question"],

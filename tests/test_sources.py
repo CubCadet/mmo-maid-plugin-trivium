@@ -84,7 +84,11 @@ def test_otdb_token_request_and_subsequent_question_call():
     assert ctx.kv.get(KV_OTDB_TOKEN) == "TOK123"
 
 
-def test_otdb_no_questions_when_rc_1():
+def test_otdb_no_questions_when_rc_1(monkeypatch):
+    # rc=1 now triggers the paced small-pool retry (see the v1.0.13 tests
+    # below) — stub the pacing sleep so this test doesn't wait ~6s for real.
+    import plugin_main
+    monkeypatch.setattr(plugin_main, "_sleep", lambda _s: None)
     ctx = MockContext()
     ctx.http.mock_response("api_token.php", status=200,
                            body='{"response_code": 0, "token": "T"}')
@@ -305,3 +309,102 @@ def test_dispatcher_honors_negative_cache_without_refetch():
     # No request was made to OTDB
     otdb_requests = [r for r in ctx.http.requests if "opentdb" in r.get("url", "")]
     assert otdb_requests == []
+
+
+# ── rc=1 small-pool retry (v1.0.13) ─────────────────────────────────────────
+#
+# OTDB response_code=1 means the pool for this category × difficulty holds
+# fewer than `amount` questions, NOT that it's empty (Gadgets never fills
+# 50 at any difficulty). fetch_otdb persists a KV small-pool hint, waits out
+# OTDB's ~5s per-IP api.php rate window (an immediate second call 429s), and
+# retries exactly once with OTDB_SMALL_POOL_AMOUNT. Hinted fetches ask for
+# the small amount up-front — one call, no wait.
+
+def _patch_sleep(monkeypatch):
+    """Replace the rc=1 pacing sleep with a recorder — a real ~6s sleep
+    would dominate the suite's runtime."""
+    import plugin_main
+    waits: list[float] = []
+    monkeypatch.setattr(plugin_main, "_sleep", waits.append)
+    return waits
+
+
+def test_otdb_rc1_paces_then_retries_with_small_pool_amount(monkeypatch):
+    from plugin_main import (
+        OTDB_BATCH_AMOUNT, OTDB_RATE_WINDOW, OTDB_SMALL_POOL_AMOUNT,
+        kv_small_pool,
+    )
+
+    waits = _patch_sleep(monkeypatch)
+    ctx = MockContext()
+    ctx.http.mock_response("api_token.php", status=200,
+                           body='{"response_code": 0, "token": "T"}')
+    # mock_response matches by URL substring, so the amount param itself
+    # routes the two api.php calls: the full-batch call reports rc=1, the
+    # small-pool retry succeeds.
+    ctx.http.mock_response(f"amount={OTDB_BATCH_AMOUNT}", status=200,
+                           body=_otdb_response_code(1))
+    ctx.http.mock_response(f"amount={OTDB_SMALL_POOL_AMOUNT}", status=200,
+                           body=_otdb_ok_body(count=2))
+
+    result = fetch_otdb(ctx, "General Knowledge", "any")
+    assert result.kind == "ok"
+    assert len(result.questions) == 2
+
+    api_calls = [r["url"] for r in ctx.http.requests if "api.php" in r["url"]]
+    assert len(api_calls) == 2
+    assert f"amount={OTDB_BATCH_AMOUNT}" in api_calls[0]
+    assert f"amount={OTDB_SMALL_POOL_AMOUNT}" in api_calls[1]
+    # The retry reuses the session token so pool suppression stays intact.
+    assert "token=T" in api_calls[0]
+    assert "token=T" in api_calls[1]
+    # The retry was paced past OTDB's rate window (mocked calls take ~0s,
+    # so the whole window remains to wait out).
+    assert len(waits) == 1
+    assert 0 < waits[0] <= OTDB_RATE_WINDOW
+    # The small pool is remembered for future fetches.
+    assert ctx.kv.get(kv_small_pool("General Knowledge", "any")) is True
+
+
+def test_otdb_rc1_on_both_calls_returns_no_questions_after_one_retry(monkeypatch):
+    from plugin_main import OTDB_BATCH_AMOUNT, OTDB_SMALL_POOL_AMOUNT
+
+    _patch_sleep(monkeypatch)
+    ctx = MockContext()
+    ctx.http.mock_response("api_token.php", status=200,
+                           body='{"response_code": 0, "token": "T"}')
+    # Every api.php call reports rc=1 — the pool really is too small.
+    ctx.http.mock_response("api.php", status=200, body=_otdb_response_code(1))
+
+    result = fetch_otdb(ctx, "General Knowledge", "any")
+    assert result.kind == "neg"
+    assert result.reason == NO_QUESTIONS
+
+    # Exactly one retry — two api.php calls total, no loop.
+    api_calls = [r["url"] for r in ctx.http.requests if "api.php" in r["url"]]
+    assert len(api_calls) == 2
+    assert f"amount={OTDB_BATCH_AMOUNT}" in api_calls[0]
+    assert f"amount={OTDB_SMALL_POOL_AMOUNT}" in api_calls[1]
+
+
+def test_otdb_hinted_small_pool_fetches_small_amount_up_front(monkeypatch):
+    from plugin_main import (
+        OTDB_SMALL_POOL_AMOUNT, SMALL_POOL_HINT_TTL, kv_small_pool,
+    )
+
+    waits = _patch_sleep(monkeypatch)
+    ctx = MockContext()
+    ctx.kv.set(kv_small_pool("General Knowledge", "any"), True,
+               ttl_seconds=SMALL_POOL_HINT_TTL)
+    ctx.http.mock_response("api_token.php", status=200,
+                           body='{"response_code": 0, "token": "T"}')
+    ctx.http.mock_response("api.php", status=200, body=_otdb_ok_body(count=2))
+
+    result = fetch_otdb(ctx, "General Knowledge", "any")
+    assert result.kind == "ok"
+
+    # One call, small amount, no pacing wait — the hint did its job.
+    api_calls = [r["url"] for r in ctx.http.requests if "api.php" in r["url"]]
+    assert len(api_calls) == 1
+    assert f"amount={OTDB_SMALL_POOL_AMOUNT}" in api_calls[0]
+    assert waits == []

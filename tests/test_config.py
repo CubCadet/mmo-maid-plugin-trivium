@@ -55,8 +55,12 @@ def test_show_renders_current_config_as_embed():
                        user_id="admin",
                        member={"permissions": PERM_MANAGE_GUILD})
     cmd_config(ctx, event, {"action": "show"})
-    assert ctx.interaction.responses
-    last = ctx.interaction.responses[-1]
+    # cmd_config defers ephemerally before the admin gate (which can make
+    # Discord REST calls), then answers via followup.
+    assert ctx.interaction.defers
+    assert ctx.interaction.defers[-1]["ephemeral"] is True
+    assert ctx.interaction.followups
+    last = ctx.interaction.followups[-1]
     assert last["ephemeral"] is True
     assert "embeds" in last
     assert any("Trivium" in (e.get("title") or "") for e in last["embeds"])
@@ -114,7 +118,7 @@ def test_set_time_rejects_malformed():
     cmd_config(ctx, event, {"action": "time", "value": "9am"})
     cfg = get_config(ctx)
     assert cfg["daily_time_utc"] is None      # unchanged
-    assert "HH:MM" in ctx.interaction.responses[-1]["content"]
+    assert "HH:MM" in ctx.interaction.followups[-1]["content"]
 
 
 def test_set_time_rejects_out_of_range_hour():
@@ -240,7 +244,7 @@ def test_non_admin_with_explicit_perms_denied():
     cfg = get_config(ctx)
     assert cfg["daily_channel_id"] is None
     # And the response should be the denial — empty allowlist → button path
-    last = ctx.interaction.responses[-1]
+    last = ctx.interaction.followups[-1]
     assert last["ephemeral"] is True
     assert "claim admin" in last["content"].lower()
     assert last.get("components"), "empty-allowlist denial must include bootstrap button"

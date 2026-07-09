@@ -143,7 +143,7 @@ def test_admin_add_rejects_bad_value():
     cmd_config(ctx, event, {"action": "admin-add", "value": "not-a-user"})
     cfg = get_config(ctx)
     assert cfg["admin_user_ids"] == ["existing"]      # unchanged
-    last = ctx.interaction.responses[-1]
+    last = ctx.interaction.followups[-1]
     assert "Couldn't parse" in last["content"]
 
 
@@ -173,7 +173,7 @@ def test_admin_add_requires_admin_caller():
     cmd_config(ctx, event, {"action": "admin-add", "value": "<@123456789012345678>"})
     cfg = get_config(ctx)
     assert cfg["admin_user_ids"] == []        # unchanged
-    last = ctx.interaction.responses[-1]
+    last = ctx.interaction.followups[-1]
     # 1.0.6: empty-allowlist denial shows the claim-admin button
     assert "claim admin" in last["content"].lower()
     assert last.get("components"), "empty-allowlist denial must include the bootstrap button"
@@ -205,7 +205,7 @@ def test_admin_remove_refuses_to_remove_last_admin():
     cfg = get_config(ctx)
     # Still there
     assert cfg["admin_user_ids"] == ["123456789012345678"]
-    last = ctx.interaction.responses[-1]
+    last = ctx.interaction.followups[-1]
     assert "last admin" in last["content"]
 
 
@@ -217,7 +217,7 @@ def test_admin_remove_unknown_user_is_informative():
     cfg = get_config(ctx)
     # No change
     assert sorted(cfg["admin_user_ids"]) == ["111111111111111111", "222222222222222222"]
-    last = ctx.interaction.responses[-1]
+    last = ctx.interaction.followups[-1]
     assert "isn't currently a Trivium admin" in last["content"]
 
 
@@ -237,7 +237,7 @@ def test_admin_list_empty_says_run_bootstrap():
     ctx.kv.set(KV_CONFIG, cfg)
     event["member"] = {"permissions": 0x8}    # ADMINISTRATOR — gets us past gate
     cmd_config(ctx, event, {"action": "admin-list"})
-    last = ctx.interaction.responses[-1]
+    last = ctx.interaction.followups[-1]
     assert "No Trivium admins configured" in last["content"]
 
 
@@ -246,7 +246,7 @@ def test_admin_list_shows_admins():
     _seed_admin(ctx, "111111111111111111", "222222222222222222")
     event = _event(user_id="111111111111111111")
     cmd_config(ctx, event, {"action": "admin-list"})
-    last = ctx.interaction.responses[-1]
+    last = ctx.interaction.followups[-1]
     assert "<@111111111111111111>" in last["content"]
     assert "<@222222222222222222>" in last["content"]
 
@@ -258,7 +258,7 @@ def test_config_show_lists_admins():
     _seed_admin(ctx, "111111111111111111")
     event = _event(user_id="111111111111111111")
     cmd_config(ctx, event, {"action": "show"})
-    embed = ctx.interaction.responses[-1]["embeds"][0]
+    embed = ctx.interaction.followups[-1]["embeds"][0]
     fields = {f["name"]: f["value"] for f in embed["fields"]}
     assert "Admins" in fields
     assert "<@111111111111111111>" in fields["Admins"]
@@ -295,7 +295,7 @@ def test_dispatch_accepts_new_adminlist_value():
     _seed_admin(ctx, "111111111111111111")
     event = _event(user_id="111111111111111111")
     cmd_config(ctx, event, {"action": "adminlist"})
-    last = ctx.interaction.responses[-1]
+    last = ctx.interaction.followups[-1]
     assert "<@111111111111111111>" in last["content"]
 
 
@@ -346,7 +346,7 @@ def test_denial_with_empty_allowlist_attaches_bootstrap_button():
     # No admins set — Layer 0 falls through; no Discord mocks → fails closed
     event = _event(user_id="rando")
     cmd_config(ctx, event, {"action": "show"})
-    last = ctx.interaction.responses[-1]
+    last = ctx.interaction.followups[-1]
     assert last["ephemeral"] is True
     assert "claim admin" in last["content"].lower()
     # Components attached with the bootstrap button
@@ -364,7 +364,7 @@ def test_denial_with_populated_allowlist_omits_bootstrap_button():
     _seed_admin(ctx, "111111111111111111")
     event = _event(user_id="rando")
     cmd_config(ctx, event, {"action": "show"})
-    last = ctx.interaction.responses[-1]
+    last = ctx.interaction.followups[-1]
     assert last["ephemeral"] is True
     assert "admin-add" in last["content"]
     # No components — no claim button when admins exist

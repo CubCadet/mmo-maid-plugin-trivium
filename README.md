@@ -98,7 +98,7 @@ Runtime files (in the upload zip):
 ```
 manifest.json          slash command schema + capabilities
 __main__.py            entire plugin runtime
-requirements.txt       pinned to yourbot-sdk 0.7.x
+requirements.txt       pinned to yourbot-sdk >=0.7.1,<0.9.0
 ```
 
 Repo-only (stripped at release time by `scripts/build_release.py`):
@@ -107,7 +107,7 @@ Repo-only (stripped at release time by `scripts/build_release.py`):
 README.md              this file
 LICENSE                MIT
 CHANGELOG.md           version history
-tests/                 pytest suite (~190 cases using MockContext)
+tests/                 pytest suite (~200 cases using MockContext)
 .github/workflows/     CI + release automation
 .gitignore .gitattributes Makefile requirements-dev.txt
 scripts/               validate_plugin.py + build_release.py

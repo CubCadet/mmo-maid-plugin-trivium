@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-validate_plugin.py — pre-flight validator for YourBot plugins (SDK v0.6.x).
+validate_plugin.py — pre-flight validator for YourBot plugins (SDK v0.6.x
+static checks + platform-parity via the installed yourbot_sdk, if present).
 
 Usage:
     python validate_plugin.py [plugin_dir]
@@ -32,6 +33,18 @@ Checks (all reported, exit code 0 only if everything passes):
  4. Layout:
        - no __pycache__/, .venv/, .git/, .DS_Store at the top level
        - estimated zipped size < 10 MB, uncompressed < 40 MB, <= 200 files
+ 5. SDK platform parity (skipped with a loud warning if yourbot_sdk isn't
+    installed — the script must keep working in an SDK-less environment):
+       - stages the runtime upload zip IN MEMORY via build_release.py's
+         collect_files() allowlist — never the repo tree, because the
+         platform validator byte-scans every .py in the zip and this very
+         script's pattern tables would false-positive the cap detectors
+       - runs the SDK's vendored platform upload validator
+         (yourbot_sdk._validation.validate_artifact) on it: slash-command
+         manifest-vs-decorator consistency, per-option name/type checks,
+         forbidden-pattern AST scan, capability byte-scan
+       - merges its errors/warnings into this report, prefixed "SDK parity",
+         so `make validate` fails exactly where a Dev Portal upload would
 
 The script doesn't run the plugin (no Discord, no Docker) — it's a static
 audit, fast enough to put in a pre-commit hook. Anything that needs runtime
@@ -582,6 +595,96 @@ def check_layout(plugin_dir: Path, f: Findings) -> None:
         f.error(f"runtime zipped size > 10 MB ({zipped/1024/1024:.1f} MB)")
 
 
+# ── SDK platform-parity stage ───────────────────────────────────────────────
+# Runs the exact validator the Dev Portal runs at upload (vendored into the
+# SDK as yourbot_sdk._validation) against the exact zip build_release.py
+# would upload. This closes the gap where a plugin passes the static checks
+# above but is rejected at upload: slash-command manifest-vs-decorator
+# consistency, per-option name/type validation, the forbidden-pattern AST
+# scan, and byte-scan cap detection (e.g. proxy:websocket) all live only in
+# the platform validator.
+#
+# IMPORTANT: the artifact is staged from build_release.py's allowlist, in
+# memory — never from the repo tree, and never written into the repo. The
+# platform validator byte-scans every .py in the zip, so validating the repo
+# tree false-positives on this script's own pattern tables (".sql.execute(",
+# '("content"'), and a zip written into the repo would itself show up as a
+# stray top-level entry on the next run.
+def check_platform_parity(plugin_dir: Path, manifest: dict, f: Findings) -> None:
+    try:
+        import yourbot_sdk
+        from yourbot_sdk._validation import validate_artifact
+    except Exception:
+        # Broad on purpose: a broken SDK install can raise more than
+        # ImportError, and the parity stage must degrade to a skip, never
+        # take down the rest of the report.
+        f.warn(
+            "SDK platform-parity stage SKIPPED — yourbot_sdk is not importable "
+            "in this environment. The platform upload validator was NOT run; "
+            "a green result here does not guarantee the Dev Portal accepts "
+            "the zip. Install yourbot-sdk to close the gap."
+        )
+        return
+
+    # Reuse build_release.py's allowlist so the parity zip and the upload zip
+    # can never drift — collect_files() is the single source of truth for the
+    # ship-list. scripts/ is sys.path[0] when this file runs as a script, but
+    # make it explicit so the import also works when run via an absolute path
+    # or imported as a module.
+    scripts_dir = str(Path(__file__).resolve().parent)
+    sys.path.insert(0, scripts_dir)
+    try:
+        from build_release import collect_files
+    except Exception:
+        # Broad on purpose: a SyntaxError here must surface as a finding,
+        # not crash the validator and swallow the whole report.
+        f.error(
+            "SDK parity — cannot import scripts/build_release.py (the ship-list "
+            "source of truth); platform-parity stage could not run"
+        )
+        return
+    finally:
+        sys.path.remove(scripts_dir)
+
+    try:
+        rel_files = collect_files(plugin_dir)
+    except FileNotFoundError as exc:
+        # Required runtime files are missing — already reported as errors by
+        # the checks above; there is no stageable artifact to validate.
+        f.warn(f"SDK platform-parity stage skipped — cannot stage artifact: {exc}")
+        return
+
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for rel in rel_files:
+            zf.write(plugin_dir / rel, str(rel))
+
+    # id/version come from the manifest (never hardcoded); if they're missing
+    # that's already an ERROR above, and the platform validator itself only
+    # flags a mismatch when the manifest value is non-empty.
+    result = validate_artifact(
+        plugin_id=str(manifest.get("id") or "").strip(),
+        version=str(manifest.get("version") or "").strip(),
+        artifact_bytes=buf.getvalue(),
+    )
+
+    sdk_ver = getattr(yourbot_sdk, "__version__", "unknown")
+    f.note(
+        f"SDK platform validator ({sdk_ver}): "
+        f"{len(result.errors)} errors, {len(result.warnings)} warnings"
+    )
+    for fnd in result.findings:
+        loc = ""
+        if fnd.path:
+            loc = f" [{fnd.path}{f':{fnd.line}' if fnd.line is not None else ''}]"
+        hint = f" — hint: {fnd.hint}" if fnd.hint else ""
+        msg = f"SDK parity — {fnd.code}: {fnd.message}{loc}{hint}"
+        if fnd.severity == "error":
+            f.error(msg)
+        else:
+            f.warn(msg)
+
+
 # ── Entry point ─────────────────────────────────────────────────────────────
 def main(argv: list[str]) -> int:
     plugin_dir = Path(argv[1] if len(argv) > 1 else ".").resolve()
@@ -596,6 +699,7 @@ def main(argv: list[str]) -> int:
     manifest = check_manifest(plugin_dir, f)
     check_source(plugin_dir, manifest, f)
     check_layout(plugin_dir, f)
+    check_platform_parity(plugin_dir, manifest, f)
     f.print_report()
     return 0 if f.ok() else 1
 

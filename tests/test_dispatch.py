@@ -137,7 +137,11 @@ def test_dispatch_config_show_routes_to_cmd_config_with_admin():
     # Inject member.permissions for admin gate
     event["member"] = {"permissions": PERM_MANAGE_GUILD}
     trivia_root(ctx, event)
-    last = ctx.interaction.responses[-1]
+    # cmd_config defers ephemerally before the admin gate (which can make
+    # Discord REST calls), then answers via followup.
+    assert ctx.interaction.defers, "cmd_config must defer"
+    assert ctx.interaction.defers[-1]["ephemeral"] is True
+    last = ctx.interaction.followups[-1]
     assert last["ephemeral"] is True
     assert last["embeds"]
     assert any("Trivium" in (e.get("title") or "") for e in last["embeds"])

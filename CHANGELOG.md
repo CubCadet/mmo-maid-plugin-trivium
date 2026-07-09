@@ -20,6 +20,99 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [1.0.13] - 2026-07-09
+
+### Changed
+- **Adopted `yourbot-sdk` 0.8.3** (dev venv + CI resolve it; the
+  `>=0.7.1,<0.9.0` pin already allowed it, so no requirements change). The
+  public surface is byte-identical to 0.8.2; the release is internal fixes —
+  notably stamping every ctx RPC with the runner-issued event id so the host
+  resolves the RPC's tenant by trusted correlation in pool mode, plus new
+  upload-validator checks (slash-command manifest↔decorator consistency,
+  `proxy:websocket` detection). Full suite green against a real 0.8.3 install;
+  the built artifact passes the 0.8.3 platform validator with zero findings.
+
+### Fixed
+- **Small question pools were permanently unplayable.** `fetch_otdb` always
+  requested `amount=50`; any category × difficulty pool holding fewer than 50
+  questions (Gadgets at every difficulty, Politics × hard, …) always returned
+  OTDB `response_code=1`, which was negative-cached for 30 minutes and fell
+  through to a Trivia API miss — users saw the transient-sounding "Trivia
+  sources are unavailable" for a *permanent* condition, for roughly a third of
+  the advertised category choices. On rc=1 the fetcher now writes a durable
+  small-pool hint (`smallpool:{category}:{difficulty}`, 30d TTL) and retries
+  once in-band with `amount=10` (`OTDB_SMALL_POOL_AMOUNT`) — *paced past
+  OTDB's ~5s per-IP `api.php` rate window* (`OTDB_RATE_WINDOW`), because an
+  immediate second call deterministically 429s (verified live during review).
+  Hinted category × difficulty combos fetch the small amount up-front from
+  then on: one call, no wait. The paced retry is budget-guarded and skipped
+  if it wouldn't fit `FETCHER_BUDGET`; the hint still makes the next fetch
+  succeed. (`fetch_otdb`.)
+- **Single-mode rapid double-click scored twice.** Two quick clicks on the
+  same answer deliver two `interaction_create` events that can both read the
+  inflight record before the first handler's `finalize_round` deletes it —
+  both then awarded points/streak (or double-broke the streak). Single mode
+  now takes the same atomic `ephemeral.dedup` gate open mode uses for
+  first-correct-wins; the losing click gets an ephemeral "You already
+  answered this round." (`on_button_click`.)
+- **A KV-quota-full server broke every answer click.** `_write_score`'s
+  `ctx.kv.set` was the one unguarded quota path in the click flow: at quota,
+  `award_points`/`break_streak` raised `KvQuotaError` before the interaction
+  response, so the clicker saw "This interaction failed", the round never
+  finalized, and (open mode) the burned win-dedup made the round unwinnable.
+  Score writes now degrade to a warning log — the click loses its points but
+  the response and finalize still run. The score-index quota drop (user
+  missing from the leaderboard) is now logged too instead of passing silently.
+  (`_write_score`, `add_to_score_index`.)
+- **A round whose inflight record couldn't be saved posted anyway and lied
+  about starting.** If `kv_inflight` hit `KvQuotaError` after the round
+  message was posted, the message stayed up with live buttons no click could
+  ever score, and the starter still got "Round started". `cmd_play` now takes
+  the message down (best-effort edit) and reports the storage failure instead
+  of the success ack; `_post_daily_question` marks an unscorable daily the
+  same way while still writing the day guard so the broken daily isn't
+  re-posted. (`cmd_play`, `_post_daily_question`.)
+- **`/trivia config` could miss the 3-second interaction deadline.** On a
+  cold admin cache, `has_manage_guild` makes up to three platform-brokered
+  Discord REST calls (`get_guild` + `list_roles` + `get_member`) before the
+  first ack — one slow hop and the admin saw "This interaction failed".
+  `cmd_config` now defers ephemerally right after the admin-bootstrap
+  dispatch; all downstream config replies switched from `respond()` to
+  `followup()` (same content, still ephemeral). (`cmd_config`,
+  `_config_*` helpers.)
+- **`trivia_root`'s last-resort net let unclassified RPC errors escape.** The
+  net caught only `SdkError`, but the transport raises plain `RuntimeError`
+  for unclassified failures (e.g. a double-ack after a sub-handler crashed
+  post-respond) — a benign cleanup failure then surfaced as
+  `handler_exception` and counted against the platform circuit breaker. The
+  net now swallows any exception from its own courtesy response **and falls
+  back to `followup()`** when `respond()` is rejected: with `cmd_config` (and
+  `cmd_play`) deferring up-front, a post-defer crash would otherwise leave
+  the user on an eternal ephemeral "thinking…" with no message at all. The
+  best-effort `edit_message` takedowns in the two new quota paths catch
+  broadly for the same reason (plain `RuntimeError` from the transport,
+  `TypeError` from pre-0.5.3 runtimes). (`trivia_root`, `cmd_play`,
+  `_post_daily_question`.)
+
+### Tooling
+- **`scripts/validate_plugin.py` now runs the SDK's vendored platform
+  validator** (`yourbot_sdk._validation.validate_artifact`) against the staged
+  runtime artifact as a final parity stage, so `make validate`, CI, and the
+  release workflow all catch upload-gate failures (slash-command
+  manifest↔decorator drift, forbidden patterns, cap mismatches) locally
+  instead of at Dev Portal upload. Skips with a visible warning when the SDK
+  isn't importable. Validating the *staged artifact* matters: the raw repo
+  tree false-positives on the validator's byte-scan (the validator script's
+  own docstrings trip it).
+
+### Tests
+- Pinned the v1.0.12 daily attempt-window dedup (a failed post throttles
+  retries for `DAILY_POST_ATTEMPT_TTL`, then actually retries), the open-mode
+  race-loser branch ("Someone beat you to it!" without a second award), the
+  new single-mode double-click gate, quota-degraded scoring, the rc=1
+  small-pool retry, and `cmd_play`'s API-failure / send-failure / quota
+  fallbacks. Existing config tests updated for the defer + followup contract.
+
 ## [1.0.12] - 2026-07-07
 
 ### Changed

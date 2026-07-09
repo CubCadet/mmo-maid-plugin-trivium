@@ -381,3 +381,95 @@ def test_finalize_passes_disabled_components_to_edit_message():
     for i in (0, 1, 3):
         assert buttons[i].style == "secondary"
         assert "✓" not in buttons[i].label
+
+
+# ── Answer-dedup gate under raced clicks (v1.0.13) ─────────────────────────
+#
+# The two race tests below re-seed kv_inflight after the winning click to
+# simulate the production window where a second interaction_create event
+# read the inflight record before the first click's finalize deleted it.
+# The ephemeral dedup on eph_dedup_answer(game_id) is the atomic gate that
+# must make the second click a no-op — inflight visibility alone can't.
+
+def test_open_mode_race_loser_does_not_score_or_refinalize():
+    ctx = MockContext()
+    _seed_inflight(ctx, mode="open", correct_idx=2)
+
+    on_button_click(ctx, _click_event("abc123", 2, user_id="player1"))
+    assert get_score(ctx, "player1")["score"] == 20
+    edits_after_win = len(ctx.messages_edited)
+    assert edits_after_win == 1                    # exactly one finalize edit
+
+    # Race window: player2's event read inflight before the winner's
+    # finalize deleted it.
+    _seed_inflight(ctx, mode="open", correct_idx=2)
+    on_button_click(ctx, _click_event("abc123", 2, user_id="player2"))
+
+    last = ctx.interaction.responses[-1]
+    assert "beat you" in last["content"].lower()
+    assert last["ephemeral"] is True
+    # Loser scored nothing
+    rec = get_score(ctx, "player2")
+    assert rec["score"] == 0
+    assert rec["total"] == 0
+    # And no second finalize: no extra edit, re-seeded inflight left to TTL out
+    assert len(ctx.messages_edited) == edits_after_win
+    assert ctx.kv.get(kv_inflight("abc123")) is not None
+
+
+def test_single_mode_rapid_double_click_scores_once():
+    ctx = MockContext()
+    _seed_inflight(ctx, mode="single", started_by_uid="starter", correct_idx=2)
+
+    on_button_click(ctx, _click_event("abc123", 2, user_id="starter"))
+    rec = get_score(ctx, "starter")
+    assert rec["score"] == 20
+    assert rec["correct"] == 1
+    edits_after_first = len(ctx.messages_edited)
+
+    # Second event of the rapid double-click, racing the first's finalize.
+    _seed_inflight(ctx, mode="single", started_by_uid="starter", correct_idx=2)
+    on_button_click(ctx, _click_event("abc123", 2, user_id="starter"))
+
+    last = ctx.interaction.responses[-1]
+    assert last["content"] == "You already answered this round."
+    assert last["ephemeral"] is True
+    # Exactly one award — no double points, no double streak bump
+    rec = get_score(ctx, "starter")
+    assert rec["score"] == 20
+    assert rec["correct"] == 1
+    assert rec["total"] == 1
+    assert len(ctx.messages_edited) == edits_after_first   # no second finalize
+
+
+# ── Quota-degraded scoring (v1.0.13) ────────────────────────────────────────
+
+def test_single_mode_correct_click_survives_kv_quota_on_score_write():
+    """KvQuotaError on the score write must degrade, not fail the click: the
+    points are dropped (with a warning log), but the interaction still gets
+    its '✅ Correct!' response and the round still finalizes. Previously a
+    quota-full server saw every answer click crash unanswered."""
+    from yourbot_sdk import KvQuotaError
+
+    ctx = MockContext()
+    _seed_inflight(ctx, mode="single", started_by_uid="starter", correct_idx=2)
+
+    # The mock KV has no quota simulation — wrap set() so only the score
+    # write fails, mirroring a server whose quota filled mid-round.
+    healthy_set = ctx.kv.set
+
+    def _quota_on_score(key, value, **kwargs):
+        if key.startswith("score:"):
+            raise KvQuotaError("kv quota exhausted")
+        return healthy_set(key, value, **kwargs)
+
+    ctx.kv.set = _quota_on_score
+    # Called directly, so an uncaught KvQuotaError would fail this test.
+    on_button_click(ctx, _click_event("abc123", 2, user_id="starter"))
+
+    assert any("✅ Correct" in r["content"] for r in ctx.interaction.responses)
+    assert ctx.kv.get(kv_inflight("abc123")) is None       # finalized
+    assert ctx.messages_edited                             # answer revealed
+    # The write really was dropped (and logged), not silently retried
+    assert get_score(ctx, "starter")["score"] == 0
+    assert any("score write dropped" in m for m in ctx.log_lines)

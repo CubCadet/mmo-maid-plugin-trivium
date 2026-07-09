@@ -352,3 +352,55 @@ def test_message_backstop_short_circuits_when_already_posted():
     # No HTTP requests, no messages sent
     assert ctx.http.requests == []
     assert ctx.messages_sent == []
+
+
+# ── Attempt-window dedup (DAILY_POST_ATTEMPT_TTL) ──────────────────────────
+
+def test_transient_failure_throttled_by_attempt_window_then_retries():
+    """Pins DAILY_POST_ATTEMPT_TTL (300s) from both sides. After a transient
+    source failure, every tick inside the attempt window must be throttled by
+    the ephemeral dedup — no new HTTP calls, nothing posted — while the first
+    tick past the window actually retries. The MockClock drives both the
+    ephemeral dedup expiry AND the KV TTLs, so advancing past 300s also lets
+    the 300s HTTP_ERROR negative caches lapse (they'd otherwise mask the
+    retry as a neg-cache hit rather than a real fetch)."""
+    from plugin_main import DAILY_POST_ATTEMPT_TTL
+
+    clock = MockClock(start=1_000.0)
+    ctx = MockContext(clock=clock)
+    _seed_cfg(ctx, time_utc="00:00")               # always past target
+    ctx.http.mock_response("api_token.php", status=200,
+                           body='{"response_code": 0, "token": "T"}')
+    # Both sources down → the post attempt fails transiently.
+    ctx.http.mock_response("api.php", status=503, body="down")
+    ctx.http.mock_response("the-trivia-api.com", status=503, body="down")
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    _maybe_post_daily(ctx)
+    assert ctx.messages_sent == []                 # nothing posted
+    assert ctx.kv.get(kv_daily(today)) is None     # day NOT marked
+    requests_after_first = len(ctx.http.requests)
+    assert requests_after_first > 0                # the attempt did hit the sources
+
+    # 60s later — still inside the 5-minute attempt window. The dedup gate
+    # must short-circuit before any fetch. Clear the HTTP_ERROR negative
+    # caches first: their TTL (300s) equals DAILY_POST_ATTEMPT_TTL, so left
+    # in place they'd silence the fetch even with the dedup gate deleted and
+    # this phase would pass vacuously.
+    from plugin_main import kv_qbatch_neg
+    for src in ("otdb", "trivia_api"):
+        ctx.kv.delete(kv_qbatch_neg(src, "General Knowledge", "any"))
+    clock.advance(60)
+    _maybe_post_daily(ctx)
+    assert len(ctx.http.requests) == requests_after_first
+    assert ctx.messages_sent == []
+
+    # Past the window (60 + 250 = 310s > 300s): dedup and neg caches have both
+    # expired. The source has recovered; the retry must fetch again and post.
+    ctx.http.mock_response("api.php", status=200, body=_otdb_body())
+    clock.advance(DAILY_POST_ATTEMPT_TTL - 60 + 10)
+    _maybe_post_daily(ctx)
+    assert len(ctx.http.requests) > requests_after_first   # retry actually fetched
+    assert len(ctx.messages_sent) == 1                     # and posted
+    assert isinstance(ctx.kv.get(kv_daily(today)), dict)
