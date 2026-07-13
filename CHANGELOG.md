@@ -20,6 +20,28 @@ CI enforces this during release builds.
 
 ## [Unreleased]
 
+## [1.0.14] - 2026-07-13
+
+### Fixed
+- **Daily trivia now has a production scheduler in pooled deployments.**
+  Replaced the worker-thread-only `@plugin.schedule(60)` task with
+  `@plugin.cron("4-59/5 * * * *")` and declared the matching `daily_tick`
+  entry in `manifest.json`, allowing the platform's server-side cron to
+  dispatch the task per installed server. The five-minute cadence deliberately
+  ends at `:59`, so a 23:56-23:59 configured time still receives a same-day
+  tick instead of rolling past midnight. The existing configured-time check,
+  durable day guard, short concurrency dedup, and command/message backstops
+  remain in place, so normal at-least-once replays and backstop races are
+  suppressed and a missed tick can still recover on later activity. This
+  follows the current v0.8.4 production contract; the locally available
+  v0.8.3 validator does not yet validate or exercise host-side cron dispatch.
+  (`daily_tick`, `manifest.json`.)
+
+### Tests
+- Added a cross-file invariant that requires every manifest cron name/spec to
+  match its registered `@plugin.cron` handler and rejects a regression back to
+  `@plugin.schedule`.
+
 ## [1.0.13] - 2026-07-09
 
 ### Changed

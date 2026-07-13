@@ -2,6 +2,7 @@
 doesn't — like "forgot to bump both manifest.json and __version__"."""
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 
@@ -49,6 +50,51 @@ def test_changelog_has_entry_for_current_version():
         f"CHANGELOG.md missing section {expected_header!r}. "
         "Add the section before tagging the release."
     )
+
+
+def test_manifest_cron_matches_registered_handlers():
+    """Production cron is manifest-driven, so both halves must stay aligned.
+
+    A decorated task without a matching manifest entry only runs in a
+    dedicated/local worker; a manifest name without a decorated function has
+    nothing to dispatch. Pin the exact name/spec pairs and make sure the old
+    pool-incompatible interval scheduler is not reintroduced.
+    """
+    manifest = json.loads((_REPO / "manifest.json").read_text(encoding="utf-8"))
+    declared = sorted(
+        (entry["name"], entry["spec"])
+        for entry in manifest.get("cron", [])
+    )
+    tree = ast.parse((_REPO / "__main__.py").read_text(encoding="utf-8"))
+    registered = []
+    interval_handlers = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call):
+                continue
+            target = decorator.func
+            if not (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "plugin"
+            ):
+                continue
+            if target.attr == "schedule":
+                interval_handlers.append(node.name)
+            elif (
+                target.attr == "cron"
+                and len(decorator.args) == 1
+                and isinstance(decorator.args[0], ast.Constant)
+                and isinstance(decorator.args[0].value, str)
+            ):
+                registered.append((node.name, decorator.args[0].value))
+    registered.sort()
+    # Ending the cadence at :59 ensures 23:56-23:59 targets get a same-day
+    # tick; a conventional */5 cadence would roll those targets past midnight.
+    assert declared == registered == [("daily_tick", "4-59/5 * * * *")]
+    assert interval_handlers == []
 
 
 def test_manifest_caps_cover_click_flow_under_strict_enforcement():

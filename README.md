@@ -8,7 +8,7 @@ A plugin for [YourBot](https://yourbot.gg) (formerly MMO Maid) — runs sandboxe
 
 Members run `/trivia play` to start a multiple-choice question with four answer buttons. The default mode is **single-player** (only the user who started the round can answer); an admin can switch a server to **open mode** where anyone can answer and the first-correct click wins. Points are awarded by difficulty (easy +10, medium +20, hard +30) and tracked per user in a server leaderboard. Streaks bump on every correct answer and break on wrong ones.
 
-Admins can configure a **daily trivia channel and UTC time** with `/trivia config`. At the configured time the plugin posts a one-hour open round in the chosen channel, and the first-correct answerer gets a +50 daily bonus on top of the difficulty award. `/trivia daily` shows the current day's result (or "not posted yet").
+Admins can configure a **daily trivia channel and UTC time** with `/trivia config`. The production cron checks every five minutes and posts the one-hour open round at the first tick on or after the configured time (an event backstop may post it sooner). The first-correct answerer gets a +50 daily bonus on top of the difficulty award. `/trivia daily` shows the current day's result (or "not posted yet").
 
 Questions come from [Open Trivia DB](https://opentdb.com) (primary) with [The Trivia API](https://the-trivia-api.com) as fallback when OTDB is rate-limited, returns no results for a (category, difficulty) combo, or exhausts its session-token suppression window. The OTDB session token is per-server and reused across all categories — its 6-hour idle timeout naturally rolls suppression state on a quiet server.
 
@@ -45,7 +45,7 @@ This plugin lands in the **Safe** tier. Each capability is requested for a speci
 
 These are deliberate trade-offs documented up-front so server admins know what to expect:
 
-1. **The embed doesn't auto-reveal the answer on timeout.** If no one clicks an answer button before the round's inflight TTL expires (default 20s for `/trivia play`, 1h for daily), the public embed stays as the original question. We don't have a reliable background-task mechanism that works across pool-mode workers, so we trade silent timeout for guaranteed multi-tenant reliability. Daily rounds with their 1-hour window almost always have a winner. (Note: when someone *does* click, the embed updates to reveal the answer and the buttons grey out — that path works fine.)
+1. **The embed doesn't auto-reveal the answer on timeout.** If no one clicks an answer button before the round's inflight TTL expires (default 20s for `/trivia play`, 1h for daily), the public embed stays as the original question. Production cron has a five-minute floor, so it cannot provide precise timeout handling for normal rounds; we trade silent timeout for reliable multi-tenant execution. Daily rounds with their 1-hour window almost always have a winner. (Note: when someone *does* click, the embed updates to reveal the answer and the buttons grey out — that path works fine.)
 2. **Some categories have no fallback.** Open Trivia DB has 24 categories; The Trivia API covers ~10 of those cleanly. Categories like Video Games, Mythology, Anime & Manga don't have a Trivia API mapping — if OTDB is unavailable for them, `/trivia play` returns "Trivia sources are unavailable, try again in a few minutes."
 
 ## Quick start (development)

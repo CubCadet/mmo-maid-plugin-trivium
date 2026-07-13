@@ -295,9 +295,11 @@ def test_no_post_when_time_is_future():
 # ── daily_tick diagnostic log ──────────────────────────────────────────────
 
 def test_daily_tick_emits_diagnostic_log():
-    """The 'daily_tick fired' diagnostic line is intentional — it tells ops
-    whether @plugin.schedule actually runs in pool mode. Don't accidentally
-    remove or rename it."""
+    """The diagnostic line confirms production manifest-cron delivery.
+
+    Keep it stable so operators can distinguish scheduled delivery from the
+    opportunistic command/message backstops.
+    """
     ctx = MockContext()
     daily_tick(ctx)
     messages = [e.get("message", "") for e in ctx.log_entries]

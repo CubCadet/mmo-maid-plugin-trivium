@@ -22,11 +22,11 @@ Architectural notes worth knowing if you're maintaining this file:
     The handler keeps its own interaction-type/prefix guards so it stays
     safe to call directly (tests do).
 
-  * @plugin.schedule(60) drives the daily-trivia post, but the SDK docs warn
-    schedules may not fire in pool mode. /trivia play carries an opportunistic
-    backstop check on every invocation so quiet pool-mode servers still
-    benefit when at least one user plays. The ephemeral dedup gate on
-    "dedup:daily:{YYYY-MM-DD}" prevents double-posts regardless of path.
+  * @plugin.cron("4-59/5 * * * *") plus the matching manifest cron entry
+    drives the daily-trivia post through the production server-side scheduler.
+    /trivia play and message_create carry opportunistic backstop checks. The
+    ephemeral dedup gate on "dedup:daily:{YYYY-MM-DD}" suppresses normal
+    duplicate deliveries and races between those paths.
 
   * Inflight round state lives in ctx.kv (with a short TTL = timer + 5s),
     NOT ctx.ephemeral. The ephemeral API only supports counter/cooldown/
@@ -57,7 +57,7 @@ from yourbot_sdk import (
 # Module-level version constant. Kept in sync with manifest.json by a regression
 # test in tests/test_meta.py. Used in the on_ready log because ctx.version is
 # empty under v0.5.2 pool-mode workers.
-__version__ = "1.0.13"
+__version__ = "1.0.14"
 
 plugin = Plugin()
 
@@ -1435,15 +1435,16 @@ def cmd_play(ctx: Context, event: dict, opts: dict) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# Daily backstop on message_create — pool-mode safety net
+# Daily backstop on message_create — scheduler safety net
 # ──────────────────────────────────────────────────────────────────────────
 #
-# In pool mode @plugin.schedule may never fire. The cmd_play backstop covers
-# servers where someone plays trivia after the configured daily time; this
-# message_create handler covers servers where the daily channel sees normal
-# chat traffic but nobody plays. _maybe_post_daily short-circuits cheaply
-# when daily isn't configured or has already posted today, so firing it on
-# every message is bounded by a single ctx.kv.exists + ephemeral.dedup check.
+# Production cron is server-side and at-least-once, but a missed tick is not
+# replayed. The cmd_play backstop covers servers where someone plays trivia
+# after the configured daily time; this message_create handler covers servers
+# where the daily channel sees normal chat traffic but nobody plays.
+# _maybe_post_daily short-circuits cheaply when daily isn't configured or has
+# already posted today, so firing it on every message is bounded by a single
+# ctx.kv.exists + ephemeral.dedup check.
 
 @plugin.on_event("message_create")
 def daily_backstop_on_message(ctx: Context, event: dict) -> None:
@@ -2174,19 +2175,20 @@ def _config_set_category(ctx: Context, cfg: dict, value) -> None:
 # Daily scheduler
 # ──────────────────────────────────────────────────────────────────────────
 
-@plugin.schedule(60)
+@plugin.cron("4-59/5 * * * *")
 def daily_tick(ctx: Context) -> None:
-    """Every 60s, check whether it's time to post today's daily.
+    """Every five minutes, check whether it's time to post today's daily.
 
-    Pool-mode caveat: @plugin.schedule may not fire. The opportunistic
-    backstop _maybe_post_daily() call in cmd_play and the message_create
-    handler below both cover servers where the schedule is silent. The
-    ephemeral dedup gate on "dedup:daily:{date}" prevents double-posts
-    whichever path fires.
+    The matching manifest cron entry makes the platform deliver this task per
+    installed server in pool mode. The opportunistic _maybe_post_daily() call
+    in cmd_play and the message_create handler remain as missed-tick backstops.
+    The ephemeral dedup gate on "dedup:daily:{date}" suppresses normal cron
+    replays and races with either backstop. The :04, :09, ..., :59 phase is
+    deliberate: every configured HH:MM gets a tick no more than four minutes
+    later without a 23:56-23:59 target rolling past UTC midnight.
 
-    The "daily_tick fired" diagnostic log is intentional — grep production
-    logs for this line over 24h to confirm whether pool-mode schedules
-    actually run on this install."""
+    The "daily_tick fired" diagnostic log is intentional — it confirms the
+    platform cron delivery path is running for an install."""
     ctx.log("daily_tick fired",
             level="info", tags=["trivium", "daily", "diagnostic"])
     try:
